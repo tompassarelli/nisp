@@ -1,13 +1,9 @@
 # nisp
 
-**Lisp for Nix — with a static checker that fires before `nix-build`.**
-
-A small Racket `#lang` that compiles to the Nix language, with full
-coverage of the Nix expression grammar. The reason for nisp's
-existence isn't the parens — it's that compiling from an eager language
-to a lazy one buys you something Nix itself can't easily do: a walkable
-AST stage *before* emission, where typos and type errors can be
-reported at the source line you wrote them on.
+**Statically-checked Lisp for Nix.** A small Racket `#lang` that
+compiles to the Nix language, paired with a checker that catches
+unknown option paths, type mismatches, and enum violations at
+`file:line:col` precision — before `nix-build` runs.
 
 ```
 $ nisp-validate
@@ -19,11 +15,21 @@ hosts/laptop/configuration.rkt:11:47: type mismatch at boot.loader.systemd-boot.
   "atuo" not in enum {"0", "1", "2", "5", "auto", "max", "keep"} — did you mean "auto"?
 ```
 
-`file:line:col` on the *value*, did-you-mean against the schema, before
-`nix-build` runs. NixOS validates option paths and types too, but only
-during module evaluation — by which point the original authoring
-context has been discarded and errors point at the force site, not the
-mistake. nisp validates earlier, against the concrete source AST.
+The reason this works isn't the parens — it's that compiling from an
+eager language to a lazy one buys you something Nix itself can't
+easily do: a walkable AST stage *before* emission. NixOS validates
+option paths and types too, but only during module evaluation, by
+which point the original authoring context has been discarded and
+errors point at the force site instead of the mistake. nisp validates
+earlier, against the concrete source AST, with the option schema NixOS
+already publishes.
+
+> **Is this *really* statically typed?** The type system being checked
+> is NixOS's options schema, not a type system defined inside nisp —
+> so strictly, nisp is gradually typed via external schema. Closer in
+> spirit to TypeScript over JavaScript or `ajv` over JSON than to ML.
+> Practically: errors before runtime, at the source line, with
+> did-you-mean. That's the bar most people mean.
 
 The DSL itself is small and predictable — every Nix construct has a
 form, mappings are mechanical:
