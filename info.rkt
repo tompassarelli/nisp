@@ -1,6 +1,6 @@
 #lang info
 (define collection "nisp")
-(define version "0.6.1")
+(define version "0.7.0")
 (define deps '("base"))
 (define build-deps '("rackunit-lib"))
 (define pkg-desc "An s-expression DSL that compiles to the Nix language")

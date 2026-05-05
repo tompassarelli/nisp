@@ -87,9 +87,13 @@ let
         if tryEnum.success then withInner // { enum = tryEnum.value; } else withInner;
     in withEnum;
 
+  declarationsOf = o:
+    let try = builtins.tryEval (o.declarations or []);
+    in if try.success then try.value else [];
+
   walk = path: o:
     if (o._type or null) == \"option\"
-    then [ ({ p = path; } // describeType (o.type or {})) ]
+    then [ ({ p = path; declarations = declarationsOf o; } // describeType (o.type or {})) ]
     else if builtins.isAttrs o
     then builtins.concatLists
       (builtins.attrValues

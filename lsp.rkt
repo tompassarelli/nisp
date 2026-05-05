@@ -177,14 +177,17 @@
   (define src (uri->path uri))
   (define diagnostics '())
   (define (add-diag! line col-start col-end severity msg [code #f])
+    (add-diag-with-data! line col-start col-end severity msg code #f))
+  (define (add-diag-with-data! line col-start col-end severity msg code data)
+    (define base
+      (hasheq 'range (hasheq 'start (hasheq 'line line 'character col-start)
+                             'end   (hasheq 'line line 'character col-end))
+              'severity severity
+              'source "nisp"
+              'message msg
+              'code (or code "nisp-error")))
     (set! diagnostics
-          (cons (hasheq 'range (hasheq 'start (hasheq 'line line 'character col-start)
-                                       'end   (hasheq 'line line 'character col-end))
-                        'severity severity   ; 1=Error 2=Warning 3=Info 4=Hint
-                        'source "nisp"
-                        'message msg
-                        'code (or code "nisp-error"))
-                diagnostics)))
+          (cons (if data (hash-set base 'data data) base) diagnostics)))
   (define stxs-or-err (parse-document-syntax src text))
   (cond
     [(and (pair? stxs-or-err) (eq? (car stxs-or-err) 'parse-error))
@@ -220,8 +223,16 @@
                     (cond [(null? sims) (format "unknown option ~a" p)]
                           [else (format "unknown option ~a — did you mean: ~a?"
                                         p (string-join sims ", "))]))
-                  (add-diag! (- line 1) col (+ col (string-length p)) 1
-                             msg "unknown-option")]))))))])
+                  ;; Attach the path + suggestions in `data` so the
+                  ;; codeAction handler can build TextEdits without
+                  ;; re-validating.
+                  (define data (hasheq 'path p
+                                       'suggestions sims
+                                       'replaceLine (- line 1)
+                                       'replaceStart col
+                                       'replaceEnd (+ col (string-length p))))
+                  (add-diag-with-data! (- line 1) col (+ col (string-length p)) 1
+                                       msg "unknown-option" data)]))))))])
   (reverse diagnostics))
 
 (define (publish-diagnostics! out uri text)
@@ -324,6 +335,73 @@
              'items limited)]))
 
 ;; ============================================================================
+;; Code actions (quick-fix: apply did-you-mean suggestion)
+;; ============================================================================
+
+(define (handle-code-action params)
+  (define uri (hash-ref (hash-ref params 'textDocument) 'uri))
+  (define ctx (hash-ref params 'context (hasheq)))
+  (define diags (hash-ref ctx 'diagnostics '()))
+  (define actions
+    (apply append
+           (map (λ (d) (diag->code-actions uri d)) diags)))
+  actions)
+
+(define (diag->code-actions uri d)
+  (define data (hash-ref d 'data #f))
+  (cond
+    [(not data) '()]
+    [else
+     (define suggestions (hash-ref data 'suggestions '()))
+     (define line (hash-ref data 'replaceLine))
+     (define start (hash-ref data 'replaceStart))
+     (define end (hash-ref data 'replaceEnd))
+     (for/list ([s (in-list suggestions)])
+       (hasheq 'title (format "Replace with `~a`" s)
+               'kind "quickfix"
+               'diagnostics (list d)
+               'isPreferred #t
+               'edit (hasheq 'changes
+                             (hasheq (string->symbol uri)
+                                     (list (hasheq
+                                            'range (hasheq
+                                                    'start (hasheq 'line line 'character start)
+                                                    'end   (hasheq 'line line 'character end))
+                                            'newText s))))))]))
+
+;; ============================================================================
+;; Goto-definition
+;; ============================================================================
+
+(define (handle-definition params)
+  (define uri (hash-ref (hash-ref params 'textDocument) 'uri))
+  (define pos (hash-ref params 'position))
+  (define line (hash-ref pos 'line))
+  (define char (hash-ref pos 'character))
+  (define text (hash-ref documents uri #f))
+  (cond
+    [(not text) (json-null)]
+    [else
+     (ensure-schema-loaded! uri)
+     (define word (text-at-position text line char))
+     (define entry (and word (hash-ref schema-table word #f)))
+     (define decls (and entry (hash-ref entry 'declarations #f)))
+     (cond
+       [(or (not decls) (null? decls)) (json-null)]
+       [else
+        ;; Return the first declaration as a Location pointing to the
+        ;; file's beginning. NixOS option declarations don't carry line
+        ;; numbers in the schema by default; we'd need to grep the file
+        ;; for the option name to refine.
+        (define decl-file (car decls))
+        (define decl-uri
+          (cond [(regexp-match? #rx"^/" decl-file) (string-append "file://" decl-file)]
+                [else decl-file]))
+        (hasheq 'uri decl-uri
+                'range (hasheq 'start (hasheq 'line 0 'character 0)
+                               'end (hasheq 'line 0 'character 0)))])]))
+
+;; ============================================================================
 ;; Dispatch
 ;; ============================================================================
 
@@ -336,16 +414,23 @@
     [(equal? method "initialize")
      (respond out id
               (hasheq 'capabilities
-                      (hasheq 'textDocumentSync 1   ; full sync
+                      (hasheq 'textDocumentSync 1
                               'hoverProvider #t
                               'completionProvider
                               (hasheq 'triggerCharacters (list "." "_")
-                                      'resolveProvider #f))
-                      'serverInfo (hasheq 'name "nisp-lsp" 'version "0.6.0")))]
+                                      'resolveProvider #f)
+                              'codeActionProvider
+                              (hasheq 'codeActionKinds (list "quickfix"))
+                              'definitionProvider #t)
+                      'serverInfo (hasheq 'name "nisp-lsp" 'version "0.7.0")))]
     [(equal? method "textDocument/hover")
      (respond out id (handle-hover params))]
     [(equal? method "textDocument/completion")
      (respond out id (handle-completion params))]
+    [(equal? method "textDocument/codeAction")
+     (respond out id (handle-code-action params))]
+    [(equal? method "textDocument/definition")
+     (respond out id (handle-definition params))]
     [(equal? method "shutdown")
      (respond out id (json-null))]
 

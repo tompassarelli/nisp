@@ -78,7 +78,8 @@ stop using nisp by deleting the `.rkt` files.
 
   All three accept `--json` for machine-readable output.
 - **`bin/nisp-rename`** — rename an option path across every `.rkt` in the flake. Word-boundary matching avoids partial collisions; `--dry-run` previews. Skips matches inside string literals.
-- **`bin/nisp-lsp`** — Language Server Protocol implementation. Diagnostics (real-time validation), hover (option type/enum), completion (option-path autocomplete). Speaks LSP over stdio; configure your editor to spawn it for `#lang nisp` files.
+- **`bin/nisp-lsp`** — Language Server Protocol implementation. Diagnostics (real-time validation), hover (option type/enum), completion (option-path autocomplete), code actions (one-click apply did-you-mean), goto-definition (jump from option path to its NixOS module source). Speaks LSP over stdio.
+- **`bin/nisp-edit`** — programmatic edits to nisp source files. Source-text-preserving (uses Racket's read-syntax for AST positions, does text-level surgery). Currently supports `set` (replace value or insert if missing) and `unset` (remove form). Comments and formatting outside the edit region are preserved.
 
   Editor configs:
 
@@ -250,13 +251,14 @@ raco test tests/
 
 ## Status
 
-`v0.6.0` — Language + validation library + 6 CLI tools
+`v0.7.0` — Language + validation library + 7 CLI tools
 (`nisp-validate`, `nisp-extract-schema`, `nisp-import`, `nisp-schema`,
-`nisp-rename`, `nisp-lsp`). Full Nix surface coverage. 47 tests. nisp
-output is byte-equivalent to hand-written Nix on a real-world
-~200-module config; nisp-import handles 100% of nixpkgs (2,332 modules)
-via rnix-parser. LSP provides diagnostics, hover, and completion. API
-may shift before `v1.0` based on usage feedback.
+`nisp-rename`, `nisp-lsp`, `nisp-edit`). Full Nix surface coverage. 47
+tests. nisp output is byte-equivalent to hand-written Nix on a
+real-world ~200-module config; nisp-import handles 100% of nixpkgs
+(2,332 modules) via rnix-parser. LSP provides diagnostics, hover,
+completion, code actions, and goto-definition. API may shift before
+`v1.0` based on usage feedback.
 
 ## License
 
