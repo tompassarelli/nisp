@@ -4,3 +4,6 @@ compiled/
 *.dep
 *.rktd
 .DS_Store
+
+# Rust build artifacts (cargo)
+nix-parser/target/

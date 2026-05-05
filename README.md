@@ -70,6 +70,7 @@ stop using nisp by deleting the `.rkt` files.
 - **`nisp/validate`** (library) — AST walker, value-type inference, schema-driven type checker, Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table.
 - **`bin/nisp-extract-schema`** — dumps an options tree (NixOS, home-manager, nix-darwin, any Nix-options-system tree) into a JSON schema cache.
 - **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with `file:line:col` precision.
+- **`bin/nisp-import`** — convert any existing `.nix` file (or stdin) to nisp source. Built on rnix-parser (a tiny Rust shim — 100% pass rate on all 2,332 nixpkgs/nixos/modules, byte-equivalent round-trip on real-world configs).
 
 The CLIs are configurable via `--target`, `--cache-dir`, `--flake`,
 `--hm-roots`. `nixosConfigurations.<host>.options` is the default
@@ -79,20 +80,24 @@ A NixOS configuration framework built on top of all this lives separately at [fi
 
 ## Install
 
-Requires Racket 8.x and (for the validator's submodule expansion) Nix.
+Requires Racket 8.x. Nix is needed for `nisp-validate`'s submodule
+expansion. Cargo is needed (one-time) to build `nisp-import`'s Rust
+parser shim.
 
 ```bash
 git clone https://github.com/tompassarelli/nisp
 cd nisp
 raco pkg install --link --auto
+cd nix-parser && cargo build --release && cd ..   # builds bin for nisp-import
 ```
 
-Add `nisp/bin` to your `PATH` (or invoke the scripts by absolute path):
+Add `nisp/bin` to your `PATH`:
 
 ```bash
 export PATH="$HOME/code/nisp/bin:$PATH"
-nisp-extract-schema   # cache a schema for your current host
-nisp-validate         # validate every .rkt in the cwd's flake
+nisp-extract-schema             # cache a schema for your current host
+nisp-validate                   # validate every .rkt in the cwd's flake
+nisp-import some-config.nix     # convert existing Nix to nisp
 ```
 
 ## Quick reference
@@ -203,10 +208,12 @@ raco test tests/
 
 ## Status
 
-`v0.3.0` — Language + validation library + CLI tools (`nisp-validate`,
-`nisp-extract-schema`). Full Nix surface coverage. 47 tests. Output is
-byte-equivalent to hand-written Nix on a real-world ~200-module config.
-API may shift before `v1.0` based on usage feedback.
+`v0.4.0` — Language + validation library + CLI tools (`nisp-validate`,
+`nisp-extract-schema`, `nisp-import`). Full Nix surface coverage. 47
+tests. nisp output is byte-equivalent to hand-written Nix on a real-
+world ~200-module config; nisp-import handles 100% of nixpkgs (2,332
+modules) via rnix-parser. API may shift before `v1.0` based on usage
+feedback.
 
 ## License
 
