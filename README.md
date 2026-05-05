@@ -78,6 +78,41 @@ stop using nisp by deleting the `.rkt` files.
 
   All three accept `--json` for machine-readable output.
 - **`bin/nisp-rename`** — rename an option path across every `.rkt` in the flake. Word-boundary matching avoids partial collisions; `--dry-run` previews. Skips matches inside string literals.
+- **`bin/nisp-lsp`** — Language Server Protocol implementation. Diagnostics (real-time validation), hover (option type/enum), completion (option-path autocomplete). Speaks LSP over stdio; configure your editor to spawn it for `#lang nisp` files.
+
+  Editor configs:
+
+  ```elisp
+  ;; Doom Emacs (lsp-mode):
+  (after! lsp-mode
+    (add-to-list 'lsp-language-id-configuration '(racket-mode . "nisp"))
+    (lsp-register-client
+     (make-lsp-client :new-connection (lsp-stdio-connection "nisp-lsp")
+                      :major-modes '(racket-mode)
+                      :server-id 'nisp-lsp)))
+  ```
+
+  ```toml
+  # Helix (languages.toml):
+  [language-server.nisp]
+  command = "nisp-lsp"
+
+  [[language]]
+  name = "racket"
+  language-servers = ["nisp"]
+  ```
+
+  ```lua
+  -- Neovim (lspconfig):
+  require'lspconfig.configs'.nisp = {
+    default_config = {
+      cmd = {'nisp-lsp'},
+      filetypes = {'racket'},
+      root_dir = require'lspconfig.util'.root_pattern('flake.rkt', 'flake.nix'),
+    },
+  }
+  require'lspconfig'.nisp.setup{}
+  ```
 
 The CLIs are configurable via `--target`, `--cache-dir`, `--flake`,
 `--hm-roots`. `nixosConfigurations.<host>.options` is the default
@@ -215,12 +250,13 @@ raco test tests/
 
 ## Status
 
-`v0.5.0` — Language + validation library + 5 CLI tools
+`v0.6.0` — Language + validation library + 6 CLI tools
 (`nisp-validate`, `nisp-extract-schema`, `nisp-import`, `nisp-schema`,
-`nisp-rename`). Full Nix surface coverage. 47 tests. nisp output is
-byte-equivalent to hand-written Nix on a real-world ~200-module config;
-nisp-import handles 100% of nixpkgs (2,332 modules) via rnix-parser.
-API may shift before `v1.0` based on usage feedback.
+`nisp-rename`, `nisp-lsp`). Full Nix surface coverage. 47 tests. nisp
+output is byte-equivalent to hand-written Nix on a real-world
+~200-module config; nisp-import handles 100% of nixpkgs (2,332 modules)
+via rnix-parser. LSP provides diagnostics, hover, and completion. API
+may shift before `v1.0` based on usage feedback.
 
 ## License
 

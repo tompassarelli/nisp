@@ -1,0 +1,37 @@
+#!/usr/bin/env racket
+#lang racket/base
+
+;; nisp-lsp — Language Server Protocol launcher.
+;;
+;; Speaks LSP over stdio. Configure your editor's LSP client to spawn
+;; this script for `#lang nisp` files.
+;;
+;; Editor configs (sketches; see README for full examples):
+;;
+;;   Doom Emacs (lsp-mode):
+;;     (after! lsp-mode
+;;       (add-to-list 'lsp-language-id-configuration '(racket-mode . "nisp"))
+;;       (lsp-register-client
+;;        (make-lsp-client :new-connection (lsp-stdio-connection "nisp-lsp")
+;;                         :major-modes '(racket-mode)
+;;                         :server-id 'nisp-lsp)))
+;;
+;;   Helix (languages.toml):
+;;     [language-server.nisp]
+;;     command = "nisp-lsp"
+;;     [[language]]
+;;     name = "racket"
+;;     language-servers = ["nisp"]
+;;
+;;   Neovim (lspconfig):
+;;     require'lspconfig.configs'.nisp = {
+;;       default_config = {
+;;         cmd = {'nisp-lsp'},
+;;         filetypes = {'racket'},
+;;         root_dir = require'lspconfig.util'.root_pattern('flake.rkt', 'flake.nix'),
+;;       };
+;;     }
+;;     require'lspconfig'.nisp.setup{}
+
+(require nisp/lsp)
+(start-lsp)
