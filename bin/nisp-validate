@@ -18,7 +18,7 @@
                   path-ref-path path-ref-stx path-ref-val-stx
                   walk-syntax extract-from-form
                   infer-value-type check-type
-                  find-similar-strs)
+                  find-similar-strs levenshtein)
          (only-in nisp/validate-cache
                   cache-config cache-config-cache-dir
                   make-schema-state schema-state-table
@@ -26,7 +26,9 @@
                   schema-lookup schema-lookup/wildcard
                   namespace-known? in-submodule?
                   has-interpolation?
-                  MODULE-STRUCTURAL-KEYS))
+                  MODULE-STRUCTURAL-KEYS)
+         (only-in nisp/edit
+                  edit-set find-set-form-positions))
 
 ;; ---------- arg parsing ----------
 
@@ -34,6 +36,7 @@
 (define CACHE-DIR (make-parameter #f))
 (define FLAKE (make-parameter #f))
 (define HM-ROOTS-RAW (make-parameter #f))
+(define AUTO-FIX? (make-parameter #f))
 
 (define files-arg
   (command-line
@@ -44,6 +47,8 @@
    [("--flake") f "flake root for `nix eval`" (FLAKE f)]
    [("--hm-roots") r "comma-separated path-prefix allowlist" (HM-ROOTS-RAW r)]
    [("--no-hm") "shorthand for --hm-roots \"\"" (HM-ROOTS-RAW "")]
+   [("--auto-fix") "apply unambiguous did-you-mean corrections (single suggestion at edit distance ≤ 2)"
+    (AUTO-FIX? #t)]
    #:args files files))
 
 (define (sh-out . args)
@@ -117,14 +122,52 @@
 (define (count-char c s)
   (for/sum ([ch (in-string s)] #:when (char=? ch c)) 1))
 
+(define auto-fixes-applied 0)
+
+(define (try-auto-fix! src-file p sims)
+  ;; Apply a did-you-mean correction only when the best suggestion is
+  ;; clearly the right one. "Clearly right" means:
+  ;;   - best is at distance ≤ 2
+  ;;   - AND no other suggestion is at the same distance (no ties)
+  ;;   - AND the runner-up is at distance ≥ best + 2 (clear gap)
+  (cond
+    [(or (not (AUTO-FIX?)) (null? sims)) #f]
+    [else
+     (define ranked
+       (sort (map (λ (s) (cons (levenshtein p s) s)) sims) < #:key car))
+     (define best (car ranked))
+     (define best-dist (car best))
+     (define best-sug (cdr best))
+     (cond
+       [(> best-dist 2) #f]
+       [(and (pair? (cdr ranked))
+             (or (= (caadr ranked) best-dist)               ; tie at best
+                 (< (caadr ranked) (+ best-dist 2))))       ; runner-up too close
+        #f]
+       [else
+        (define text (file->string src-file))
+        (define old-re
+          (regexp (string-append "(?<![a-zA-Z0-9_-])" (regexp-quote p) "(?=$|[^a-zA-Z0-9_-])")))
+        (define replaced (regexp-replace* old-re text best-sug))
+        (cond
+          [(equal? replaced text) #f]
+          [else
+           (display-to-file replaced src-file #:exists 'replace)
+           (set! auto-fixes-applied (+ auto-fixes-applied 1))
+           #t])])]))
+
 (define (report-unknown-path src stx p)
-  (set! total-errors (+ total-errors 1))
   (define line (or (syntax-line stx) "?"))
   (define col  (or (syntax-column stx) "?"))
-  (eprintf "~a:~a:~a: unknown option ~a\n" src line col p)
   (define sims (find-similar p))
-  (when (not (null? sims))
-    (eprintf "  did you mean: ~a?\n" (string-join sims ", " #:before-last " or "))))
+  (cond
+    [(try-auto-fix! src p sims)
+     (eprintf "~a:~a:~a: auto-fixed ~a → ~a\n" src line col p (car sims))]
+    [else
+     (set! total-errors (+ total-errors 1))
+     (eprintf "~a:~a:~a: unknown option ~a\n" src line col p)
+     (when (not (null? sims))
+       (eprintf "  did you mean: ~a?\n" (string-join sims ", " #:before-last " or ")))]))
 
 (define (report-type-mismatch src val-stx p msg)
   (set! total-errors (+ total-errors 1))
@@ -204,6 +247,9 @@
 
 (for ([f (in-list files)])
   (validate-file f))
+
+(when (and (AUTO-FIX?) (positive? auto-fixes-applied))
+  (printf "nisp-validate: applied ~a auto-fix(es). Re-run to verify.\n" auto-fixes-applied))
 
 (if (zero? total-errors)
     (printf "nisp-validate: clean — no unknown options.\n")

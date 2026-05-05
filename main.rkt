@@ -10,7 +10,7 @@
                      [nisp-top #%top])
          #%app #%datum quote
          ;; --- existing nisp surface ---
-         enable set service pkg hm hm-bare hm-module submodule-impl
+         enable set service pkg svc hm hm-bare hm-module submodule-impl
          ;; --- atoms ---
          s ms p nl
          ;; --- compound ---
@@ -622,6 +622,38 @@
          (desc desc-str)
          (config-body
            (mk-entry "environment.systemPackages" (lst pkg-path))))]))
+
+;; (svc name) — symmetric to (pkg name) but for services.
+;; Emits a module that enables `services.<name>` (instead of installing it).
+;; (svc name "desc")            — with description
+;; (svc name service-path)      — when the service path differs from the module name
+(define-syntax (svc stx)
+  (syntax-case stx ()
+    [(_ name)
+     (identifier? #'name)
+     #'(module-file modules name
+         (desc (string-append (symbol->string 'name) " service"))
+         (config-body
+           (mk-entry (string-append "services." (symbol->string 'name) ".enable")
+                     (nix-bool #t))))]
+    [(_ name desc-str)
+     (and (identifier? #'name) (string? (syntax->datum #'desc-str)))
+     #'(module-file modules name
+         (desc desc-str)
+         (config-body
+           (mk-entry (string-append "services." (symbol->string 'name) ".enable")
+                     (nix-bool #t))))]
+    [(_ name service-path desc-str)
+     (and (identifier? #'name)
+          (or (identifier? #'service-path) (string? (syntax->datum #'service-path))))
+     #'(module-file modules name
+         (desc desc-str)
+         (config-body
+           (mk-entry (string-append (if (string? 'service-path)
+                                        'service-path
+                                        (symbol->string 'service-path))
+                                    ".enable")
+                     (nix-bool #t))))]))
 
 ;; (hm body...) — sugar for wrapping body in home-manager.users.${username}.
 ;; Use inside a module-file that has a `username` let-binding (typically via

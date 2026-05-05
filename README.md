@@ -69,7 +69,7 @@ stop using nisp by deleting the `.rkt` files.
 - **The DSL** (`#lang nisp`) — every construct in Nix's expression grammar has a corresponding nisp form.
 - **`nisp/validate`** (library) — AST walker, value-type inference, schema-driven type checker, Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table.
 - **`bin/nisp-extract-schema`** — dumps an options tree (NixOS, home-manager, nix-darwin, any Nix-options-system tree) into a JSON schema cache.
-- **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with `file:line:col` precision.
+- **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with `file:line:col` precision. `--auto-fix` rewrites unambiguous typos in place (best did-you-mean at distance ≤ 2 with a clear gap to the runner-up).
 - **`bin/nisp-import`** — convert any existing `.nix` file (or stdin) to nisp source. Built on rnix-parser (a tiny Rust shim — 100% pass rate on all 2,332 nixpkgs/nixos/modules, byte-equivalent round-trip on real-world configs). Comments preserved through the import.
 - **`bin/nisp-schema`** — query the cached options schema. Three modes:
     - `nisp-schema services.openssh.enable` — exact lookup (type/enum/inner)
@@ -258,14 +258,16 @@ contributor.
 
 ## Status
 
-`v0.9.0` — Language + validation library + 7 CLI tools
+`v0.10.0` — Language + validation library + 7 CLI tools
 (`nisp-validate`, `nisp-extract-schema`, `nisp-import`, `nisp-schema`,
-`nisp-rename`, `nisp-lsp`, `nisp-edit`). Full Nix surface coverage. 68
+`nisp-rename`, `nisp-lsp`, `nisp-edit`). Full Nix surface coverage. 75
 tests. nisp output is byte-equivalent to hand-written Nix on a
 real-world ~200-module config; nisp-import handles 100% of nixpkgs
 (2,332 modules) via rnix-parser. LSP provides diagnostics, hover,
 completion, code actions, and goto-definition. nisp-edit supports
-multi-arg `(enable …)` list manipulation. API may shift before `v1.0`
+multi-arg `(enable …)` list manipulation. `nisp-validate --auto-fix`
+rewrites unambiguous option-path typos. New `(svc name)` shortcut
+mirrors `(pkg name)` for service modules. API may shift before `v1.0`
 based on usage feedback.
 
 ## License
