@@ -57,6 +57,70 @@
    #:args files
    files))
 
+;; ---------- comment threading ----------
+;;
+;; Pending-comments is a list of comment hashes in source order. When
+;; emitting a structural boundary (attrset entry, list item, top-level),
+;; we flush pending comments whose start position is before the upcoming
+;; node's start.
+
+(define PENDING-COMMENTS (make-parameter '()))
+
+(define (comment-start c) (hash-ref (hash-ref c 'pos) 'start))
+(define (node-start n)
+  (cond
+    [(hash? n) (let ([p (hash-ref n 'pos #f)])
+                 (and p (hash-ref p 'start #f)))]
+    [else #f]))
+
+(define (flush-comments-before! node-pos depth)
+  ;; Returns a string containing any comments whose start < node-pos.
+  ;; Comments are formatted as `;;` lines (Racket convention).
+  (cond
+    [(not node-pos) ""]
+    [else
+     (define ind (indent depth))
+     (define out '())
+     (define remaining
+       (let loop ([cs (PENDING-COMMENTS)])
+         (cond
+           [(null? cs) cs]
+           [(< (comment-start (car cs)) node-pos)
+            (set! out (cons (format-comment (car cs) ind) out))
+            (loop (cdr cs))]
+           [else cs])))
+     (PENDING-COMMENTS remaining)
+     (cond
+       [(null? out) ""]
+       [else (string-append (apply string-append (reverse out)) ind)])]))
+
+(define (flush-remaining-comments depth)
+  (define ind (indent depth))
+  (define out
+    (apply string-append
+           (map (λ (c) (format-comment c ind)) (PENDING-COMMENTS))))
+  (PENDING-COMMENTS '())
+  out)
+
+(define (format-comment c ind)
+  ;; Convert Nix `# foo` and `/* foo */` to Racket `;; foo` (potentially
+  ;; multi-line for block comments).
+  (define text (hash-ref c 'text))
+  (define kind (hash-ref c 'kind "line"))
+  (cond
+    [(equal? kind "line")
+     ;; Strip the leading `#` and any leading space.
+     (define stripped (regexp-replace #px"^#\\s?" text ""))
+     (format "~a;; ~a\n" ind stripped)]
+    [else
+     ;; Block comment: strip /* and */, emit each interior line as a `;;`
+     (define inner (regexp-replace #px"^/\\*\\s?" text ""))
+     (define inner2 (regexp-replace #px"\\s?\\*/$" inner ""))
+     (define lines (regexp-split #rx"\n" inner2))
+     (apply string-append
+            (map (λ (l) (format "~a;; ~a\n" ind (regexp-replace #px"^\\s+" l "")))
+                 lines))]))
+
 ;; ---------- run the parser, get JSON ----------
 
 (define (run-parser source-text)
@@ -225,9 +289,22 @@
      (format "(~a ~a)" ctor (emit-entries-inline entries (+ depth 1)))]
     [else
      (define ind (indent (+ depth 1)))
-     (format "(~a\n~a~a)" ctor
-             (string-join (map (λ (e) (string-append ind (emit-entry e (+ depth 1)))) entries) "\n")
-             "")]))
+     (format "(~a\n~a)" ctor
+             (string-join
+              (map (λ (e)
+                     (define before (flush-comments-before! (entry-start e) (+ depth 1)))
+                     (string-append before
+                                    (or (and (zero? (string-length before)) ind) "")
+                                    (emit-entry e (+ depth 1))))
+                   entries)
+              "\n"))]))
+
+(define (entry-start e)
+  ;; Use the entry's value position as a proxy (entries themselves don't
+  ;; have a top-level pos; values do).
+  (case (kind-of e)
+    [("AttrpathValue") (node-start (hash-ref e 'value))]
+    [else #f]))
 
 (define (short-attrset? entries)
   (and (<= (length entries) 1)
@@ -426,17 +503,27 @@
   (define result (run-parser source-text))
   (define ast (hash-ref result 'ast))
   (define errors (hash-ref result 'errors '()))
+  (define comments
+    ;; Sort by start position to match source order.
+    (sort (hash-ref result 'comments '()) <
+          #:key comment-start))
   (when (not (null? errors))
     (eprintf "nisp-import: ~a parse error(s):\n" (length errors))
     (for ([e (in-list errors)]) (eprintf "  ~a\n" e)))
-  (define body (emit-expr ast 1))
-  (define wrapped
-    (cond [(WRAP-RAW-FILE?) (format "(raw-file~n  ~a)~n" body)]
-          [else (string-append body "\n")]))
-  (define final
-    (cond [(LANG-LINE?) (string-append "#lang nisp\n\n" wrapped)]
-          [else wrapped]))
-  (display final))
+  (parameterize ([PENDING-COMMENTS comments])
+    ;; File-leading comments: anything whose pos is before the AST root.
+    (define root-start (or (node-start ast) +inf.0))
+    (define lead (flush-comments-before! root-start 0))
+    (define body (emit-expr ast 1))
+    ;; Trailing comments after the root expression.
+    (define trail (flush-remaining-comments 0))
+    (define wrapped
+      (cond [(WRAP-RAW-FILE?) (format "(raw-file~n  ~a)~n" body)]
+            [else (string-append body "\n")]))
+    (define final
+      (cond [(LANG-LINE?) (string-append "#lang nisp\n\n" lead wrapped trail)]
+            [else (string-append lead wrapped trail)]))
+    (display final)))
 
 (cond
   [(null? files-arg)

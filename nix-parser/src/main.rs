@@ -12,12 +12,14 @@ use std::io::{self, Read};
 use rnix::ast::{self, HasEntry};
 use rowan::ast::{AstChildren, AstNode};
 use rnix::ast::AstToken;
+use rnix::SyntaxKind;
 use serde::Serialize;
 use serde_json::{json, Value};
 
 #[derive(Serialize)]
 struct Output {
     ast: Value,
+    comments: Vec<Value>,
     errors: Vec<String>,
 }
 
@@ -36,7 +38,30 @@ fn main() {
     let root = parse.tree();
     let ast = root.expr().map(|e| expr_to_json(&e)).unwrap_or(Value::Null);
 
-    let out = Output { ast, errors };
+    // Walk the rowan tree for comment trivia tokens. rnix preserves them
+    // in the lossless syntax tree; the typed AST sheds them.
+    let mut comments = Vec::new();
+    for ev in root.syntax().preorder_with_tokens() {
+        if let rowan::WalkEvent::Enter(elem) = ev {
+            if let Some(tok) = elem.as_token() {
+                if tok.kind() == SyntaxKind::TOKEN_COMMENT {
+                    let r = tok.text_range();
+                    let text = tok.text();
+                    let kind = if text.starts_with("/*") { "block" } else { "line" };
+                    comments.push(json!({
+                        "text": text,
+                        "kind": kind,
+                        "pos": {
+                            "start": usize::from(r.start()),
+                            "end": usize::from(r.end()),
+                        }
+                    }));
+                }
+            }
+        }
+    }
+
+    let out = Output { ast, comments, errors };
     println!("{}", serde_json::to_string(&out).unwrap());
 }
 

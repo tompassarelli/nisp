@@ -70,7 +70,7 @@ stop using nisp by deleting the `.rkt` files.
 - **`nisp/validate`** (library) — AST walker, value-type inference, schema-driven type checker, Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table.
 - **`bin/nisp-extract-schema`** — dumps an options tree (NixOS, home-manager, nix-darwin, any Nix-options-system tree) into a JSON schema cache.
 - **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with `file:line:col` precision.
-- **`bin/nisp-import`** — convert any existing `.nix` file (or stdin) to nisp source. Built on rnix-parser (a tiny Rust shim — 100% pass rate on all 2,332 nixpkgs/nixos/modules, byte-equivalent round-trip on real-world configs).
+- **`bin/nisp-import`** — convert any existing `.nix` file (or stdin) to nisp source. Built on rnix-parser (a tiny Rust shim — 100% pass rate on all 2,332 nixpkgs/nixos/modules, byte-equivalent round-trip on real-world configs). Comments preserved through the import.
 - **`bin/nisp-schema`** — query the cached options schema. Three modes:
     - `nisp-schema services.openssh.enable` — exact lookup (type/enum/inner)
     - `nisp-schema --children services.openssh` — list all sub-options under a prefix
