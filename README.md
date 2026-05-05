@@ -1,19 +1,43 @@
 # nisp
 
-**An s-expression DSL that compiles to the Nix language.** A custom
-Racket `#lang` for writing Nix code (NixOS modules, flakes, home-manager
-config, derivations, anything) as Lisp, with full coverage of the Nix
-expression grammar.
+**Lisp for Nix — with a static checker that fires before `nix-build`.**
+
+A small Racket `#lang` that compiles to the Nix language, with full
+coverage of the Nix expression grammar. The reason for nisp's
+existence isn't the parens — it's that compiling from an eager language
+to a lazy one buys you something Nix itself can't easily do: a walkable
+AST stage *before* emission, where typos and type errors can be
+reported at the source line you wrote them on.
+
+```
+$ nisp-validate
+modules/printing/default.rkt:6:7: unknown option services.pipwire.alsa.enable
+  did you mean: services.pipewire.alsa.enable or services.pipewire.pulse.enable?
+modules/foo/default.rkt:9:34: type mismatch at services.openssh.enable:
+  expected bool, got string
+hosts/laptop/configuration.rkt:11:47: type mismatch at boot.loader.systemd-boot.consoleMode:
+  "atuo" not in enum {"0", "1", "2", "5", "auto", "max", "keep"} — did you mean "auto"?
+```
+
+`file:line:col` on the *value*, did-you-mean against the schema, before
+`nix-build` runs. NixOS validates option paths and types too, but only
+during module evaluation — by which point the original authoring
+context has been discarded and errors point at the force site, not the
+mistake. nisp validates earlier, against the concrete source AST.
+
+The DSL itself is small and predictable — every Nix construct has a
+form, mappings are mechanical:
 
 ```racket
 #lang nisp
 
-(att
-  (services.openssh.enable #t)
-  (networking.firewall.allowedTCPPorts (lst 80 443))
-  (users.users.tom (att (isNormalUser #t)
-                        (shell pkgs.zsh)
-                        (extraGroups (lst "wheel" "docker")))))
+(raw-file
+  (att
+    (services.openssh.enable #t)
+    (networking.firewall.allowedTCPPorts (lst 80 443))
+    (users.users.tom (att (isNormalUser #t)
+                          (shell pkgs.zsh)
+                          (extraGroups (lst "wheel" "docker"))))))
 ```
 
 →
@@ -30,26 +54,22 @@ expression grammar.
 }
 ```
 
-## Why
+Both `.rkt` source and emitted `.nix` are committed; the flake reads
+ordinary Nix. You're not trapped — drop down to raw Nix anytime, or
+stop using nisp by deleting the `.rkt` files.
 
-nisp gives you Nix's value model (lazy attrset/list/lambda) with Lisp's
-authoring ergonomics and — crucially — an **eager AST stage** before
-emission. Tools that walk a nisp program can do source-aware checks
-that Nix can't: validate option paths against the NixOS schema,
-type-check values, lint, refactor, generate documentation. All with
-file:line:col precision pointing at your `.rkt` source, before any
-`nix-build` runs.
+## What ships
 
-`nisp` ships the language and the full toolchain for source-aware validation:
+- **The DSL** (`#lang nisp`) — every construct in Nix's expression grammar has a corresponding nisp form.
+- **`nisp/validate`** (library) — AST walker, value-type inference, schema-driven type checker, Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table.
+- **`bin/nisp-extract-schema`** — dumps an options tree (NixOS, home-manager, nix-darwin, any Nix-options-system tree) into a JSON schema cache.
+- **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with `file:line:col` precision.
 
-- **The DSL itself** (`#lang nisp`) — every construct in Nix's expression grammar has a corresponding nisp form.
-- **`nisp/validate`** (library) — AST walker + value-type inference + schema-driven type checker + Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table.
-- **`bin/nisp-extract-schema`** — dumps an options tree (NixOS, home-manager, nix-darwin, anything that uses Nix's options system) into a JSON schema cache.
-- **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with file:line:col precision.
+The CLIs are configurable via `--target`, `--cache-dir`, `--flake`,
+`--hm-roots`. `nixosConfigurations.<host>.options` is the default
+target — override for home-manager-only, nix-darwin, or anything else.
 
-The CLIs are configurable via `--target`, `--cache-dir`, `--flake`, `--hm-roots`. `nixosConfigurations.<host>.options` is the default target — override for home-manager-only or other configs.
-
-A NixOS configuration framework built on top of all this lives separately in [firnos](https://github.com/tompassarelli/firnos) — modules, bundles, host configs, scaffolding, the `firn` CLI for daily workflow.
+A NixOS configuration framework built on top of all this lives separately at [firnos](https://github.com/tompassarelli/firnos) — modules, bundles, host configs, scaffolding, the `firn` CLI for daily workflow.
 
 ## Install
 
