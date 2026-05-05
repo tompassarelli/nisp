@@ -18,7 +18,7 @@ jobs:
 
       - name: Link nisp package
         run: |
-          raco pkg install --auto --batch --link --force .
+          raco pkg install --auto --batch --link --force "$GITHUB_WORKSPACE"
           raco setup nisp
 
       - name: Run tests
