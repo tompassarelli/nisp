@@ -40,9 +40,14 @@ type-check values, lint, refactor, generate documentation. All with
 file:line:col precision pointing at your `.rkt` source, before any
 `nix-build` runs.
 
-`nisp` itself is just the language — small, dependency-free,
-well-tested. The validator/CLI/framework that turn it into a NixOS
-authoring tool live separately (see [Companion projects](#companion-projects)).
+`nisp` ships the language and the validation primitives:
+
+- **The DSL itself** (`#lang nisp`) — every construct in Nix's expression grammar has a corresponding nisp form.
+- **`nisp/validate`** — generic AST walker + value-type inference + schema-driven type checker + Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table you provide. Doesn't know about flakes, hosts, or caches — those are consumer concerns.
+
+The CLI/framework that turns this into a NixOS authoring tool (schema
+extraction, lazy submodule expansion, file-watching, scaffolding) lives
+separately in [firnos](https://github.com/tompassarelli/firnos).
 
 ## Install
 
@@ -117,6 +122,41 @@ The full AST is exposed via `(struct-out ...)` for `nix-bool`,
 `nix-int`, `nix-string`, `nix-attrs`, `nix-let`, `nix-lambda`,
 `nix-binop`, `nix-unop`, `nix-select`, `nix-has-attr`, `nix-assert`, etc.
 
+### Validation primitives
+
+`nisp/validate` provides the building blocks for source-aware
+validation: walk a parsed source, extract every option-path reference,
+infer each value's static shape, and check it against your schema:
+
+```racket
+(require nisp/validate)
+
+;; You provide schema-table: hash from path → entry hash with 't, 'inner, 'enum.
+(define schema-table
+  (hash "services.openssh.enable" (hasheq 't "bool")
+        "networking.firewall.allowedTCPPorts"
+        (hasheq 't "listOf" 'inner (hasheq 't "unsignedInt16"))))
+
+;; Walk syntax, validate every set/enable.
+(walk-syntax (read-syntax 'src port)
+  (λ (stx in-hm?)
+    (for ([pr (in-list (extract-from-form stx))])
+      (define p (path-ref-path pr))
+      (cond
+        [(hash-has-key? schema-table p)
+         (when (path-ref-val-stx pr)
+           (define vt (infer-value-type (path-ref-val-stx pr)))
+           (define result (check-type (hash-ref schema-table p) vt))
+           (when (and (pair? result) (eq? (car result) 'mismatch))
+             (eprintf "type mismatch at ~a: ~a\n" p (cadr result))))]
+        [else
+         (eprintf "unknown option ~a (did you mean: ~a?)\n"
+                  p (find-similar-strs p (hash-keys schema-table)))]))))
+```
+
+Bring your own schema source — the NixOS options tree, a home-manager
+options dump, your own custom config schema. nisp doesn't care.
+
 ## Tests
 
 ```bash
@@ -134,9 +174,10 @@ raco test tests/
 
 ## Status
 
-`v0.1.0` — Nix surface coverage is complete (every construct in
-`src/libexpr/parser.y` has a nisp form). API may shift before `v1.0`
-based on usage feedback. Tests pass, output is byte-equivalent to
+`v0.2.0` — Nix surface coverage is complete (every construct in
+`src/libexpr/parser.y` has a nisp form). Validation primitives
+(`nisp/validate`) added in 0.2.0. API may shift before `v1.0` based on
+usage feedback. 47 tests pass, output is byte-equivalent to
 hand-written Nix on a real-world ~200-module config.
 
 ## License
