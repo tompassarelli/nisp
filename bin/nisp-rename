@@ -97,8 +97,12 @@
 ;; Match OLD as a whole identifier-like path. The path might be followed
 ;; by a dot+suffix (sub-path) — those should be renamed too. Word boundary
 ;; on the LEFT (so `services.opensshd` doesn't match for OLD=services.openssh).
+;; Negative lookbehind: prevent matching inside an identifier like
+;; `myfoo.bar`. Apostrophe is NOT excluded (we want to match the
+;; quoted form `'foo.bar` — that's the canonical way option paths
+;; appear in nisp).
 (define OLD-RE
-  (regexp (string-append "(?<![a-zA-Z0-9_'-])" (regexp-quote OLD) "(?=$|[^a-zA-Z0-9_-])")))
+  (regexp (string-append "(?<![a-zA-Z0-9_-])" (regexp-quote OLD) "(?=$|[^a-zA-Z0-9_-])")))
 
 (define (in-string-literal? line offset)
   ;; Count unescaped " chars before `offset`. Odd → inside a string.

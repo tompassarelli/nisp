@@ -11,8 +11,7 @@
                   infer-value-type
                   check-type
                   find-similar-strs
-                  levenshtein
-                  describe-val))
+                  levenshtein))
 
 (define (parse src)
   (define port (open-input-string src))

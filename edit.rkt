@@ -27,11 +27,14 @@
 
 ;; ---------- locate (set 'PATH …) and (set PATH …) forms ----------
 
-;; Returns a list of (start . end) byte positions for every `(set …)`
-;; form in src whose first arg is a quoted symbol matching exactly the
-;; given path string. Positions are relative to the original src
-;; (we pad the stripped #lang line with newlines so positions match up).
-(define (find-set-form-positions src target-path)
+(define (count-newlines s)
+  (for/sum ([c (in-string s)] #:when (char=? c #\newline)) 1))
+
+;; Walk every top-level form in `src` (a #lang nisp source string),
+;; calling `visit` on each syntax node. Strips the #lang line first
+;; (read-syntax can't cross #lang) and pads with whitespace so byte
+;; positions in the resulting syntax objects match positions in `src`.
+(define (walk-source-forms src visit)
   (define-values (lang-prefix rest)
     (let ([m (regexp-match-positions #rx"^#lang [^\n]*\n" src)])
       (cond [m (values (substring src 0 (cdr (car m)))
@@ -45,54 +48,39 @@
                    rest))
   (define port (open-input-string padded))
   (port-count-lines! port)
-  (define out '())
   (with-handlers ([exn:fail? (λ (_) (void))])
     (let loop ()
       (define stx (read-syntax 'src port))
       (unless (eof-object? stx)
-        (walk stx
-          (λ (s)
-            (define matched-pos (set-form-matches? s target-path))
-            (when matched-pos
-              (set! out (cons matched-pos out)))))
-        (loop))))
-  (reverse out))
+        (walk stx visit)
+        (loop)))))
 
-(define (count-newlines s)
-  (for/sum ([c (in-string s)] #:when (char=? c #\newline)) 1))
+;; Returns a list of (start . end) byte positions for every `(set …)`
+;; form in src whose first arg is a quoted symbol matching exactly the
+;; given path string.
+(define (find-set-form-positions src target-path)
+  (define out '())
+  (walk-source-forms src
+    (λ (s)
+      (define matched-pos (set-form-matches? s target-path))
+      (when matched-pos
+        (set! out (cons matched-pos out)))))
+  (reverse out))
 
 ;; Returns a list of (start . end) positions for ALL `(set …)` forms in
 ;; src, regardless of path. Used by edit-set to position new forms next
 ;; to existing (set …) calls.
 (define (find-all-set-form-positions src)
-  (define-values (lang-prefix rest)
-    (let ([m (regexp-match-positions #rx"^#lang [^\n]*\n" src)])
-      (cond [m (values (substring src 0 (cdr (car m)))
-                       (substring src (cdr (car m))))]
-            [else (values "" src)])))
-  (define padded
-    (string-append (make-string (count-newlines lang-prefix) #\newline)
-                   (make-string (- (string-length lang-prefix)
-                                   (count-newlines lang-prefix))
-                                #\space)
-                   rest))
-  (define port (open-input-string padded))
-  (port-count-lines! port)
   (define out '())
-  (with-handlers ([exn:fail? (λ (_) (void))])
-    (let loop ()
-      (define stx (read-syntax 'src port))
-      (unless (eof-object? stx)
-        (walk stx
-          (λ (s)
-            (define lst (syntax->list s))
-            (when (and lst (pair? lst)
-                       (identifier? (car lst))
-                       (eq? (syntax->datum (car lst)) 'set))
-              (define start (sub1 (syntax-position s)))
-              (define span (syntax-span s))
-              (set! out (cons (cons start (+ start span)) out)))))
-        (loop))))
+  (walk-source-forms src
+    (λ (s)
+      (define lst (syntax->list s))
+      (when (and lst (pair? lst)
+                 (identifier? (car lst))
+                 (eq? (syntax->datum (car lst)) 'set))
+        (define start (sub1 (syntax-position s)))
+        (define span (syntax-span s))
+        (set! out (cons (cons start (+ start span)) out)))))
   (reverse out))
 
 (define (walk stx visit)

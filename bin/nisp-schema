@@ -21,7 +21,10 @@
          racket/file
          racket/path
          json
-         (only-in nisp/validate find-similar-strs))
+         (only-in nisp/validate find-similar-strs)
+         (only-in nisp/validate-cache
+                  cache-config make-schema-state
+                  schema-state-table load-schema!))
 
 ;; ---------- locate cache ----------
 
@@ -74,18 +77,16 @@
   (eprintf "nisp-schema: ~a not found. Run nisp-extract-schema.\n" SCHEMA-PATH)
   (exit 2))
 
-(define schema-table
-  (let ([h (make-hash)])
-    (for ([e (in-list (call-with-input-file SCHEMA-PATH read-json))])
-      (hash-set! h (hash-ref e 'p) e))
-    ;; Fold submodule cache if present.
-    (when (file-exists? SUB-CACHE-PATH)
-      (with-handlers ([exn:fail? void])
-        (define sd (call-with-input-file SUB-CACHE-PATH read-json))
-        (for* ([(_prefix entries) (in-hash (hash-ref sd 'submodules (hash)))]
-               [e (in-list entries)])
-          (hash-set! h (hash-ref e 'p) e))))
-    h))
+(define STATE
+  (let ([cfg (cache-config (or (path-only SCHEMA-PATH) (current-directory))
+                           (CACHE-DIR)
+                           "nixosConfigurations.default.options"  ; not used for read-only
+                           '())])
+    (define s (make-schema-state cfg))
+    (load-schema! s)
+    s))
+
+(define schema-table (schema-state-table STATE))
 
 ;; ---------- emit ----------
 

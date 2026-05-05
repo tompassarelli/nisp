@@ -54,25 +54,21 @@
  ;; Value-type inference
  infer-value-type
  attrset-val-types
- describe-val
 
  ;; Type matching
  check-type
 
- ;; Type-name predicates and constants (handy for custom matchers)
- STR-TYPES
- INT-TYPES
- PERMISSIVE-TYPES
- str-type?
- int-type?
- path-type?
- bool-type?
- float-type?
- permissive-type?
-
  ;; Did-you-mean
  levenshtein
  find-similar-strs)
+
+;; Internal helpers (not exported; available within the library):
+;; describe-val, STR-TYPES, INT-TYPES, PERMISSIVE-TYPES, str-type?,
+;; int-type?, path-type?, bool-type?, float-type?, permissive-type?
+;; — these were exposed for hypothetical "third-party validator builders"
+;; that never materialized. Removed from public API; internal callers in
+;; check-type still use them. If you need them as escape hatches, file
+;; an issue with the use case.
 
 ;; ============================================================================
 ;; AST walking

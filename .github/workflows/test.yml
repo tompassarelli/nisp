@@ -21,5 +21,39 @@ jobs:
           raco pkg install --auto --batch --link --force "$GITHUB_WORKSPACE"
           raco setup nisp
 
-      - name: Run tests
+      - name: Run Racket tests
         run: raco test tests/
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Rust shim (nix-parser)
+        working-directory: nix-parser
+        run: cargo build --release
+
+      - name: Smoke-test nix-parser CLI
+        run: |
+          echo '{ services.openssh.enable = true; }' \
+            | ./nix-parser/target/release/nisp-nix-parser \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['ast']['kind']=='AttrSet', d; print('ok')"
+
+      - name: Round-trip nisp-import on synthetic samples
+        # Each sample: parse Nix → emit nisp source → emit nix from nisp →
+        # check it parses back as valid Nix (semantic equivalence proxy).
+        run: |
+          mkdir -p /tmp/roundtrip
+          for sample in \
+            '{ services.openssh.enable = true; }' \
+            '{ a = 1; b = "two"; c = [ 1 2 3 ]; }' \
+            '{ config, pkgs, ... }: { networking.firewall.allowedTCPPorts = [ 22 80 ]; }' \
+            'rec { a = 1; b = a + 1; }' \
+            'with pkgs; { environment.systemPackages = [ vim git ]; }' \
+          ; do
+            echo "$sample" > /tmp/roundtrip/in.nix
+            ./bin/nisp-import /tmp/roundtrip/in.nix > /tmp/roundtrip/out.rkt
+            # Verify the .rkt parses + emits without error
+            racket /tmp/roundtrip/out.rkt > /tmp/roundtrip/out.nix
+            # Verify the result is non-empty and parses as Nix again
+            test -s /tmp/roundtrip/out.nix
+            ./nix-parser/target/release/nisp-nix-parser /tmp/roundtrip/out.nix > /dev/null
+            echo "ok: $sample"
+          done

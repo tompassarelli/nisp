@@ -20,6 +20,7 @@
          racket/path
          racket/file
          racket/match
+         racket/runtime-path
          json
          (only-in nisp/validate
                   walk-syntax
@@ -29,7 +30,21 @@
                   path-ref-val-stx
                   infer-value-type
                   check-type
-                  find-similar-strs))
+                  find-similar-strs)
+         (only-in nisp/validate-cache
+                  cache-config cache-config-cache-dir
+                  make-schema-state schema-state? schema-state-table
+                  load-schema!
+                  schema-lookup
+                  in-submodule?))
+
+;; Pull version from the package's info.rkt instead of hardcoding.
+(define-runtime-path INFO-RKT "info.rkt")
+(define NISP-VERSION
+  (with-handlers ([exn:fail? (λ (_) "0.0.0")])
+    (define src (file->string INFO-RKT))
+    (define m (regexp-match #px"\\(define version \"([^\"]+)\"\\)" src))
+    (cond [m (cadr m)] [else "0.0.0"])))
 
 (provide start-lsp)
 
@@ -84,48 +99,45 @@
 ;; ============================================================================
 
 (define documents (make-hash))   ; uri → text
-(define schema-table (make-hash))
-(define schema-loaded? #f)
+(define STATE #f)                ; schema-state, lazily initialized
 
 (define (uri->path uri)
-  ;; file:///foo/bar.rkt → /foo/bar.rkt
-  (cond
-    [(regexp-match #rx"^file://(.+)$" uri) => cadr]
-    [else uri]))
+  (cond [(regexp-match #rx"^file://(.+)$" uri) => cadr]
+        [else uri]))
 
-(define (find-cache-dir doc-uri)
+(define (find-flake-root doc-uri)
   (define p (uri->path doc-uri))
   (let loop ([d (if (file-exists? p) (path-only p) (string->path p))])
     (cond
       [(not d) #f]
-      [(directory-exists? (build-path d ".nisp-cache"))
-       (build-path d ".nisp-cache")]
-      [(file-exists? (build-path d "flake.rkt"))
-       (build-path d ".nisp-cache")]
-      [(file-exists? (build-path d "flake.nix"))
-       (build-path d ".nisp-cache")]
+      [(directory-exists? (build-path d ".nisp-cache")) d]
+      [(file-exists? (build-path d "flake.rkt")) d]
+      [(file-exists? (build-path d "flake.nix")) d]
       [else
        (define-values (parent _ _isdir) (split-path d))
-       (cond
-         [(or (not parent) (eq? parent 'relative)) #f]
-         [else (loop parent)])])))
+       (cond [(or (not parent) (eq? parent 'relative)) #f]
+             [else (loop parent)])])))
 
 (define (ensure-schema-loaded! example-uri)
-  (unless schema-loaded?
-    (define cd (find-cache-dir example-uri))
-    (when cd
-      (define schema-path (build-path cd "schema.json"))
-      (define sub-path    (build-path cd "schema-submodules.json"))
+  (unless STATE
+    (define root (find-flake-root example-uri))
+    (when root
+      ;; Use a generic target — the LSP doesn't have host info from the
+      ;; client. Lazy submodule expansion would need that; for now we
+      ;; just load the cached base schema + any cached submodules.
+      (define cfg (cache-config root
+                                (build-path root ".nisp-cache")
+                                ;; Target is required by cache-key but not used
+                                ;; for read-only loading of an existing cache.
+                                "nixosConfigurations.default.options"
+                                '()))
+      (set! STATE (make-schema-state cfg))
       (with-handlers ([exn:fail? void])
-        (when (file-exists? schema-path)
-          (for ([e (in-list (call-with-input-file schema-path read-json))])
-            (hash-set! schema-table (hash-ref e 'p) e)))
-        (when (file-exists? sub-path)
-          (define sd (call-with-input-file sub-path read-json))
-          (for* ([(_prefix entries) (in-hash (hash-ref sd 'submodules (hash)))]
-                 [e (in-list entries)])
-            (hash-set! schema-table (hash-ref e 'p) e))))
-      (set! schema-loaded? #t))))
+        (load-schema! STATE)))))
+
+(define (schema-table)
+  (cond [STATE (schema-state-table STATE)]
+        [else (make-hash)]))
 
 ;; ============================================================================
 ;; Validation
@@ -154,22 +166,7 @@
         [(eof-object? stx) (reverse acc)]
         [else (loop (cons stx acc))]))))
 
-(define SUBMODULE-TYPES
-  '("attrsOf" "submodule" "lazyAttrsOf" "listOf" "oneOf" "either"
-    "functionTo" "unspecified"))
-
-(define (in-submodule? path)
-  (let loop ([parts (regexp-split #rx"\\." path)])
-    (cond
-      [(null? parts) #f]
-      [(null? (cdr parts)) #f]
-      [else
-       (define prefix-parts (drop-right parts 1))
-       (define prefix (string-join prefix-parts "."))
-       (define entry (hash-ref schema-table prefix #f))
-       (define t (and entry (hash-ref entry 't #f)))
-       (cond [(and t (member t SUBMODULE-TYPES)) #t]
-             [else (loop prefix-parts)])])))
+;; in-submodule? imported from validate-cache; takes the schema state.
 
 (define (validate-document uri text)
   ;; Returns list of LSP-style diagnostic hashes.
@@ -202,10 +199,10 @@
                (define stx-loc (path-ref-stx pr))
                (define val-stx (path-ref-val-stx pr))
                (cond
-                 [(hash-has-key? schema-table p)
+                 [(hash-has-key? (schema-table) p)
                   ;; Phase 2: type check
                   (when val-stx
-                    (define entry (hash-ref schema-table p))
+                    (define entry (hash-ref (schema-table) p))
                     (define vt (infer-value-type val-stx))
                     (define result (check-type entry vt))
                     (when (and (pair? result) (eq? (car result) 'mismatch))
@@ -214,11 +211,11 @@
                       (add-diag! (- line 1) col (+ col 10) 1
                                  (format "type mismatch at ~a: ~a" p (cadr result))
                                  "type-mismatch")))]
-                 [(in-submodule? p) (void)]
+                 [(in-submodule? STATE p) (void)]
                  [else
                   (define line (or (syntax-line stx-loc) 1))
                   (define col  (or (syntax-column stx-loc) 0))
-                  (define sims (find-similar-strs p (hash-keys schema-table) 3))
+                  (define sims (find-similar-strs p (hash-keys (schema-table)) 3))
                   (define msg
                     (cond [(null? sims) (format "unknown option ~a" p)]
                           [else (format "unknown option ~a — did you mean: ~a?"
@@ -280,7 +277,7 @@
     [else
      (ensure-schema-loaded! uri)
      (define word (text-at-position text line char))
-     (define entry (and word (hash-ref schema-table word #f)))
+     (define entry (and word (hash-ref (schema-table) word #f)))
      (cond
        [entry
         (define t (hash-ref entry 't "?"))
@@ -320,7 +317,7 @@
      (ensure-schema-loaded! uri)
      (define word (or (text-at-position text line char) ""))
      (define matches
-       (for/list ([(p e) (in-hash schema-table)]
+       (for/list ([(p e) (in-hash (schema-table))]
                   #:when (and (string? p)
                               (string-prefix? p word)))
          (define t (hash-ref e 't "?"))
@@ -384,22 +381,45 @@
     [else
      (ensure-schema-loaded! uri)
      (define word (text-at-position text line char))
-     (define entry (and word (hash-ref schema-table word #f)))
+     (define entry (and word (hash-ref (schema-table) word #f)))
      (define decls (and entry (hash-ref entry 'declarations #f)))
      (cond
        [(or (not decls) (null? decls)) (json-null)]
        [else
-        ;; Return the first declaration as a Location pointing to the
-        ;; file's beginning. NixOS option declarations don't carry line
-        ;; numbers in the schema by default; we'd need to grep the file
-        ;; for the option name to refine.
         (define decl-file (car decls))
         (define decl-uri
           (cond [(regexp-match? #rx"^/" decl-file) (string-append "file://" decl-file)]
                 [else decl-file]))
+        ;; Refine line/col by grepping the declaration file for the
+        ;; option's last segment, e.g. `enable = mkEnableOption` for
+        ;; `services.openssh.enable`. Falls back to 0:0 on miss.
+        (define-values (line col) (grep-decl-position decl-file word))
         (hasheq 'uri decl-uri
-                'range (hasheq 'start (hasheq 'line 0 'character 0)
-                               'end (hasheq 'line 0 'character 0)))])]))
+                'range (hasheq 'start (hasheq 'line line 'character col)
+                               'end (hasheq 'line line 'character col)))])]))
+
+(define (grep-decl-position decl-file option-path)
+  ;; Look for `<lastSegment> = ` near the start of a line. Imperfect (a
+  ;; sub-option might match its parent's literal occurrence) but more
+  ;; useful than always returning 0:0.
+  (define last-seg
+    (let ([parts (regexp-split #rx"\\." option-path)])
+      (cond [(null? parts) option-path]
+            [else (last parts)])))
+  (with-handlers ([exn:fail? (λ (_) (values 0 0))])
+    (cond
+      [(not (file-exists? decl-file)) (values 0 0)]
+      [else
+       (define needle (regexp (string-append "^\\s*" (regexp-quote last-seg) "\\s*=")))
+       (define content (file->string decl-file))
+       (define lines (regexp-split #rx"\n" content))
+       (define hit
+         (for/or ([line (in-list lines)] [i (in-naturals)]
+                  #:when (regexp-match? needle line))
+           (define col (or (cdr (regexp-match-positions #px"^\\s*" line)) 0))
+           (cons i (if (number? col) col 0))))
+       (cond [hit (values (car hit) (cdr hit))]
+             [else (values 0 0)])])))
 
 ;; ============================================================================
 ;; Dispatch
@@ -422,7 +442,7 @@
                               'codeActionProvider
                               (hasheq 'codeActionKinds (list "quickfix"))
                               'definitionProvider #t)
-                      'serverInfo (hasheq 'name "nisp-lsp" 'version "0.7.0")))]
+                      'serverInfo (hasheq 'name "nisp-lsp" 'version NISP-VERSION)))]
     [(equal? method "textDocument/hover")
      (respond out id (handle-hover params))]
     [(equal? method "textDocument/completion")

@@ -249,6 +249,13 @@ raco test tests/
   (`firn-validate`), CLI (`firn`), and module/bundle conventions. If
   you want "Doom Emacs for NixOS config", that's the one.
 
+## Working on nisp itself
+
+See [AGENTS.md](AGENTS.md) for the agent-targeted context: repo layout,
+how to add a new DSL form / CLI / LSP capability, release process, and
+the don't-do list. Aimed at AI coding agents but useful for any
+contributor.
+
 ## Status
 
 `v0.7.0` — Language + validation library + 7 CLI tools
