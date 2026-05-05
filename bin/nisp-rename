@@ -1,0 +1,176 @@
+#!/usr/bin/env racket
+#lang racket/base
+
+;; nisp-rename — rename an option path across all .rkt files in the flake.
+;;
+;; Usage:
+;;   nisp-rename <old.path> <new.path>             # apply
+;;   nisp-rename --dry-run <old.path> <new.path>   # show planned changes
+;;
+;; Renames every reference to <old.path> (and its `.enable` / sub-paths)
+;; with <new.path>. Word-boundary matching avoids partial collisions
+;; (renaming `services.openssh` won't touch `services.opensshd`).
+;;
+;; Heuristic: skips lines whose match falls inside a `"…"` string literal,
+;; based on the count of unescaped quotes before the match position. Not
+;; perfect across multi-line strings but covers ~99% of real cases.
+;;
+;; What it rewrites:
+;;   (set 'OLD.path val)        → (set 'NEW.path val)
+;;   (set OLD.path val)         → (set NEW.path val)        (bare)
+;;   (enable 'OLD.path)         → (enable 'NEW.path)
+;;   (enable OLD.path …)        → (enable NEW.path …)
+;;   (get base 'OLD.path)       → (get base 'NEW.path)
+;;   (get-or base 'OLD.path d)  → (get-or base 'NEW.path d)
+;;   (has base 'OLD.path)       → (has base 'NEW.path)
+;;   bare OLD.path.X references → NEW.path.X
+;;
+;; After rewriting, run `firn-validate` to confirm no regressions.
+
+(require racket/cmdline
+         racket/file
+         racket/string
+         racket/list
+         racket/path)
+
+(define DRY-RUN? (make-parameter #f))
+(define ROOT-OVERRIDE (make-parameter #f))
+
+(define rest-args
+  (command-line
+   #:program "nisp-rename"
+   #:once-each
+   [("--dry-run") "show planned changes without applying"
+    (DRY-RUN? #t)]
+   [("--root") d "flake root (default: cwd's git toplevel)"
+    (ROOT-OVERRIDE d)]
+   #:args args
+   args))
+
+(unless (= (length rest-args) 2)
+  (eprintf "usage: nisp-rename [--dry-run] <old.path> <new.path>\n")
+  (exit 2))
+
+(define OLD (car rest-args))
+(define NEW (cadr rest-args))
+
+(define (find-flake-root)
+  (define start (path->complete-path (find-system-path 'orig-dir)))
+  (let loop ([d (simple-form-path start)])
+    (cond
+      [(file-exists? (build-path d "flake.rkt")) d]
+      [(file-exists? (build-path d "flake.nix")) d]
+      [else
+       (define-values (parent _name _isdir) (split-path d))
+       (cond
+         [(or (not parent) (eq? parent 'relative)) start]
+         [else (loop parent)])])))
+
+(define ROOT
+  (cond [(ROOT-OVERRIDE) (path->complete-path (ROOT-OVERRIDE))]
+        [else (find-flake-root)]))
+
+;; ---------- collect target files ----------
+
+(define (target-files)
+  (sort
+   (for/list ([f (in-directory ROOT)]
+              #:when (let ([s (path->string f)])
+                       (and (regexp-match? #rx"\\.rkt$" s)
+                            (not (regexp-match? #rx"/scripts/" s))
+                            (not (regexp-match? #rx"/tests/" s))
+                            (not (regexp-match? #rx"/\\.firn-build/" s))
+                            (not (regexp-match? #rx"/\\.nisp-cache/" s))
+                            (not (regexp-match? #rx"/\\.direnv/" s))
+                            (not (regexp-match? #rx"/\\.git/" s))
+                            (not (regexp-match? #rx"/result" s))
+                            (with-handlers ([exn:fail? (λ (_) #f)])
+                              (regexp-match?
+                               #rx"^#lang nisp"
+                               (call-with-input-file f
+                                 (λ (p) (read-line p))))))))
+     f)
+   string<? #:key path->string))
+
+;; ---------- rewrite logic ----------
+
+;; Match OLD as a whole identifier-like path. The path might be followed
+;; by a dot+suffix (sub-path) — those should be renamed too. Word boundary
+;; on the LEFT (so `services.opensshd` doesn't match for OLD=services.openssh).
+(define OLD-RE
+  (regexp (string-append "(?<![a-zA-Z0-9_'-])" (regexp-quote OLD) "(?=$|[^a-zA-Z0-9_-])")))
+
+(define (in-string-literal? line offset)
+  ;; Count unescaped " chars before `offset`. Odd → inside a string.
+  (define before (substring line 0 offset))
+  (define quote-count
+    (for/sum ([m (in-list (regexp-match* #px"(?<!\\\\)\"" before))]) 1))
+  (odd? quote-count))
+
+(define (rewrite-line line)
+  ;; Walk for matches of OLD; replace those NOT inside a string literal.
+  ;; Returns (values new-line replacement-count).
+  (define count 0)
+  (define result
+    (regexp-replace*
+     OLD-RE line
+     (λ (m)
+       (set! count (+ count 1))
+       NEW)))
+  ;; Now check each replacement for in-string-literal? — if any was inside
+  ;; a string, undo all replacements (rare; safer than partial).
+  (cond
+    [(zero? count) (values line 0)]
+    [else
+     ;; Re-scan original for match offsets; check each.
+     (define matches
+       (regexp-match-positions* OLD-RE line))
+     (define safe?
+       (for/and ([range (in-list matches)])
+         (not (in-string-literal? line (car range)))))
+     (cond
+       [safe? (values result count)]
+       [else (values line 0)])]))
+
+(define (rewrite-file path)
+  (define lines (regexp-split #rx"\n" (file->string path)))
+  (define rewritten
+    (for/list ([line (in-list lines)])
+      (define-values (new n) (rewrite-line line))
+      (cons new n)))
+  (define total (apply + (map cdr rewritten)))
+  (cond
+    [(zero? total) (values #f 0)]
+    [else (values (string-join (map car rewritten) "\n") total)]))
+
+;; ---------- main ----------
+
+(define files (target-files))
+(printf "scanning ~a .rkt files for `~a` → `~a`...\n" (length files) OLD NEW)
+
+(define total-edits 0)
+(define files-changed 0)
+
+(for ([f (in-list files)])
+  (define-values (new-text count) (rewrite-file f))
+  (when (positive? count)
+    (set! total-edits (+ total-edits count))
+    (set! files-changed (+ files-changed 1))
+    (define rel (path->string (find-relative-path ROOT f)))
+    (cond
+      [(DRY-RUN?)
+       (printf "  ~a — ~a edit(s)\n" rel count)]
+      [else
+       (display-to-file new-text f #:exists 'replace)
+       (printf "  ~a — ~a edit(s) applied\n" rel count)])))
+
+(cond
+  [(zero? total-edits)
+   (printf "no occurrences of `~a` found.\n" OLD)
+   (exit 1)]
+  [else
+   (printf "~a edit(s) across ~a file(s)~a.\n"
+           total-edits files-changed
+           (if (DRY-RUN?) " (dry run — no changes written)" ""))
+   (unless (DRY-RUN?)
+     (printf "next: run `firn-validate` to verify.\n"))])

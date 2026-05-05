@@ -71,6 +71,13 @@ stop using nisp by deleting the `.rkt` files.
 - **`bin/nisp-extract-schema`** — dumps an options tree (NixOS, home-manager, nix-darwin, any Nix-options-system tree) into a JSON schema cache.
 - **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with `file:line:col` precision.
 - **`bin/nisp-import`** — convert any existing `.nix` file (or stdin) to nisp source. Built on rnix-parser (a tiny Rust shim — 100% pass rate on all 2,332 nixpkgs/nixos/modules, byte-equivalent round-trip on real-world configs).
+- **`bin/nisp-schema`** — query the cached options schema. Three modes:
+    - `nisp-schema services.openssh.enable` — exact lookup (type/enum/inner)
+    - `nisp-schema --children services.openssh` — list all sub-options under a prefix
+    - `nisp-schema --search ssh` — fuzzy substring search across all 16k+ paths
+
+  All three accept `--json` for machine-readable output.
+- **`bin/nisp-rename`** — rename an option path across every `.rkt` in the flake. Word-boundary matching avoids partial collisions; `--dry-run` previews. Skips matches inside string literals.
 
 The CLIs are configurable via `--target`, `--cache-dir`, `--flake`,
 `--hm-roots`. `nixosConfigurations.<host>.options` is the default
@@ -208,12 +215,12 @@ raco test tests/
 
 ## Status
 
-`v0.4.0` — Language + validation library + CLI tools (`nisp-validate`,
-`nisp-extract-schema`, `nisp-import`). Full Nix surface coverage. 47
-tests. nisp output is byte-equivalent to hand-written Nix on a real-
-world ~200-module config; nisp-import handles 100% of nixpkgs (2,332
-modules) via rnix-parser. API may shift before `v1.0` based on usage
-feedback.
+`v0.5.0` — Language + validation library + 5 CLI tools
+(`nisp-validate`, `nisp-extract-schema`, `nisp-import`, `nisp-schema`,
+`nisp-rename`). Full Nix surface coverage. 47 tests. nisp output is
+byte-equivalent to hand-written Nix on a real-world ~200-module config;
+nisp-import handles 100% of nixpkgs (2,332 modules) via rnix-parser.
+API may shift before `v1.0` based on usage feedback.
 
 ## License
 
