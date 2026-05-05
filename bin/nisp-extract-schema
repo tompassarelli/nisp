@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# nisp-extract-schema — dump an options tree (path + type info) into a
+# JSON cache for the validator to consume.
+#
+# Each entry has:
+#   p     - dotted option path
+#   t     - top-level type name ("bool", "str", "listOf", "nullOr", "enum", ...)
+#   inner - (optional) recursive {t, inner?, enum?} for parameterized types
+#   enum  - (optional) list of valid values for enum types
+#
+# Usage:
+#   nisp-extract-schema [--target <attr-path>] [--out <file>] [--flake <dir>]
+#
+# Defaults:
+#   --target  nixosConfigurations.$(hostname).options
+#   --out     <flake-root>/.nisp-cache/schema.json
+#   --flake   $(git rev-parse --show-toplevel) or .
+#
+# Examples:
+#   nisp-extract-schema
+#   nisp-extract-schema --target homeConfigurations.tom.options
+#   nisp-extract-schema --target darwinConfigurations.mac.options --out cache/schema.json
+#
+# Re-run after `nix flake update` or after adding/changing your own
+# options. Cached output is read by `nisp-validate`.
+
+set -euo pipefail
+
+# ---------- arg parsing ----------
+
+TARGET=""
+OUT=""
+FLAKE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) TARGET="$2"; shift 2 ;;
+    --out)    OUT="$2";    shift 2 ;;
+    --flake)  FLAKE="$2";  shift 2 ;;
+    -h|--help)
+      sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *)
+      echo "nisp-extract-schema: unknown arg: $1" >&2
+      exit 2 ;;
+  esac
+done
+
+# ---------- defaults ----------
+
+if [[ -z "$FLAKE" ]]; then
+  if FLAKE="$(git rev-parse --show-toplevel 2>/dev/null)"; then :; else FLAKE="$(pwd)"; fi
+fi
+FLAKE="${FLAKE%/}"   # strip trailing slash; Nix rejects it
+
+if [[ -z "$TARGET" ]]; then
+  TARGET="nixosConfigurations.$(hostname).options"
+fi
+
+if [[ -z "$OUT" ]]; then
+  OUT="$FLAKE/.nisp-cache/schema.json"
+fi
+
+mkdir -p "$(dirname "$OUT")"
+
+echo "nisp-extract-schema: extracting $TARGET from $FLAKE..."
+
+nix eval --json --impure --expr "
+let
+  flake = builtins.getFlake (toString $FLAKE);
+  opts  = flake.$TARGET;
+
+  describeType = t:
+    let
+      base = { t = t.name or \"?\"; };
+      tryInner =
+        if (t ? nestedTypes) && (t.nestedTypes ? elemType)
+        then builtins.tryEval (describeType t.nestedTypes.elemType)
+        else { success = false; value = null; };
+      withInner =
+        if tryInner.success then base // { inner = tryInner.value; } else base;
+      tryEnum =
+        if (t.name or \"\") == \"enum\" && (t ? functor) && (t.functor ? payload) && (t.functor.payload ? values)
+        then builtins.tryEval t.functor.payload.values
+        else { success = false; value = null; };
+      withEnum =
+        if tryEnum.success then withInner // { enum = tryEnum.value; } else withInner;
+    in withEnum;
+
+  walk = path: o:
+    if (o._type or null) == \"option\"
+    then [ ({ p = path; } // describeType (o.type or {})) ]
+    else if builtins.isAttrs o
+    then builtins.concatLists
+      (builtins.attrValues
+        (builtins.mapAttrs (n: v: walk (if path == \"\" then n else \"\${path}.\${n}\") v) o))
+    else [];
+in walk \"\" opts
+" > "$OUT" 2>/dev/null
+
+count=$(python3 -c "import json; print(len(json.load(open('$OUT'))))")
+size=$(wc -c < "$OUT")
+
+echo "nisp-extract-schema: cached $count option paths ($size bytes) → $OUT"

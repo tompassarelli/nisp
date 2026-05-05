@@ -40,18 +40,20 @@ type-check values, lint, refactor, generate documentation. All with
 file:line:col precision pointing at your `.rkt` source, before any
 `nix-build` runs.
 
-`nisp` ships the language and the validation primitives:
+`nisp` ships the language and the full toolchain for source-aware validation:
 
 - **The DSL itself** (`#lang nisp`) — every construct in Nix's expression grammar has a corresponding nisp form.
-- **`nisp/validate`** — generic AST walker + value-type inference + schema-driven type checker + Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table you provide. Doesn't know about flakes, hosts, or caches — those are consumer concerns.
+- **`nisp/validate`** (library) — AST walker + value-type inference + schema-driven type checker + Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table.
+- **`bin/nisp-extract-schema`** — dumps an options tree (NixOS, home-manager, nix-darwin, anything that uses Nix's options system) into a JSON schema cache.
+- **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with file:line:col precision.
 
-The CLI/framework that turns this into a NixOS authoring tool (schema
-extraction, lazy submodule expansion, file-watching, scaffolding) lives
-separately in [firnos](https://github.com/tompassarelli/firnos).
+The CLIs are configurable via `--target`, `--cache-dir`, `--flake`, `--hm-roots`. `nixosConfigurations.<host>.options` is the default target — override for home-manager-only or other configs.
+
+A NixOS configuration framework built on top of all this lives separately in [firnos](https://github.com/tompassarelli/firnos) — modules, bundles, host configs, scaffolding, the `firn` CLI for daily workflow.
 
 ## Install
 
-Requires Racket 8.x.
+Requires Racket 8.x and (for the validator's submodule expansion) Nix.
 
 ```bash
 git clone https://github.com/tompassarelli/nisp
@@ -59,11 +61,12 @@ cd nisp
 raco pkg install --link --auto
 ```
 
-Verify:
+Add `nisp/bin` to your `PATH` (or invoke the scripts by absolute path):
 
 ```bash
-echo '#lang nisp
-(att (a 1) (b "hi") (c (lst 1 2 3)))' | racket -I racket/base -e '(read)'
+export PATH="$HOME/code/nisp/bin:$PATH"
+nisp-extract-schema   # cache a schema for your current host
+nisp-validate         # validate every .rkt in the cwd's flake
 ```
 
 ## Quick reference
@@ -174,11 +177,10 @@ raco test tests/
 
 ## Status
 
-`v0.2.0` — Nix surface coverage is complete (every construct in
-`src/libexpr/parser.y` has a nisp form). Validation primitives
-(`nisp/validate`) added in 0.2.0. API may shift before `v1.0` based on
-usage feedback. 47 tests pass, output is byte-equivalent to
-hand-written Nix on a real-world ~200-module config.
+`v0.3.0` — Language + validation library + CLI tools (`nisp-validate`,
+`nisp-extract-schema`). Full Nix surface coverage. 47 tests. Output is
+byte-equivalent to hand-written Nix on a real-world ~200-module config.
+API may shift before `v1.0` based on usage feedback.
 
 ## License
 
