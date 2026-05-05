@@ -3,7 +3,10 @@
 ;; edit-test — unit tests for nisp/edit (programmatic source edits).
 
 (require rackunit
-         (only-in nisp/edit edit-set edit-unset find-set-form-positions))
+         (only-in nisp/edit
+                  edit-set edit-unset
+                  edit-enable-add edit-enable-remove
+                  find-set-form-positions))
 
 (define SAMPLE
   "#lang nisp
@@ -64,3 +67,53 @@
   (check-true (regexp-match? #rx";; module description" after))
   (check-true (regexp-match? #rx";; the openssh service" after))
   (check-true (regexp-match? #rx"port 2222" after)))
+
+;; ---------- enable-add / enable-remove ----------
+
+(define ENABLE-SAMPLE
+  "#lang nisp
+
+(host-file
+  (enable myConfig.modules.boot
+          myConfig.modules.networking)
+  (set 'myConfig.modules.users.username \"tom\"))
+")
+
+(test-case "edit-enable-add: append to existing (enable …)"
+  (define after (edit-enable-add ENABLE-SAMPLE "myConfig.modules.ssh"))
+  (check-true (regexp-match? #rx"myConfig\\.modules\\.boot" after))
+  (check-true (regexp-match? #rx"myConfig\\.modules\\.networking" after))
+  (check-true (regexp-match? #rx"myConfig\\.modules\\.ssh" after)))
+
+(test-case "edit-enable-add: idempotent if already present"
+  (define after (edit-enable-add ENABLE-SAMPLE "myConfig.modules.boot"))
+  (check-equal? after ENABLE-SAMPLE))
+
+(test-case "edit-enable-add: insert new form when no (enable …) exists"
+  (define src "#lang nisp\n(host-file\n  (set 'foo \"bar\"))\n")
+  (define after (edit-enable-add src "myConfig.modules.boot"))
+  (check-true (regexp-match? #rx"\\(enable myConfig\\.modules\\.boot\\)" after)))
+
+(test-case "edit-enable-remove: drops one path, leaves others"
+  (define after (edit-enable-remove ENABLE-SAMPLE "myConfig.modules.networking"))
+  (check-true (regexp-match? #rx"myConfig\\.modules\\.boot" after))
+  (check-false (regexp-match? #rx"myConfig\\.modules\\.networking" after))
+  ;; Form is preserved (still has boot)
+  (check-true (regexp-match? #rx"\\(enable" after)))
+
+(test-case "edit-enable-remove: removes form entirely if path was only arg"
+  (define src "#lang nisp\n(host-file\n  (enable myConfig.modules.lonely)\n  (set 'foo \"bar\"))\n")
+  (define after (edit-enable-remove src "myConfig.modules.lonely"))
+  (check-false (regexp-match? #rx"myConfig\\.modules\\.lonely" after))
+  (check-false (regexp-match? #rx"\\(enable" after))
+  (check-true (regexp-match? #rx"\\(set 'foo" after)))
+
+(test-case "edit-enable-remove: no-op if path absent"
+  (define after (edit-enable-remove ENABLE-SAMPLE "myConfig.modules.absent"))
+  (check-equal? after ENABLE-SAMPLE))
+
+(test-case "edit-enable-remove: handles 'quoted form too"
+  (define src "#lang nisp\n(host-file\n  (enable 'myConfig.modules.a 'myConfig.modules.b))\n")
+  (define after (edit-enable-remove src "myConfig.modules.a"))
+  (check-false (regexp-match? #rx"myConfig\\.modules\\.a" after))
+  (check-true (regexp-match? #rx"myConfig\\.modules\\.b" after)))

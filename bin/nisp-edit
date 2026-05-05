@@ -21,7 +21,9 @@
 
 (require racket/cmdline
          racket/file
-         (only-in nisp/edit edit-set edit-unset))
+         (only-in nisp/edit
+                  edit-set edit-unset
+                  edit-enable-add edit-enable-remove))
 
 (define args
   (command-line
@@ -29,7 +31,8 @@
    #:args args args))
 
 (when (< (length args) 2)
-  (eprintf "usage: nisp-edit <set|unset> <file> [<option-path> [<value>]]\n")
+  (eprintf "usage: nisp-edit <op> <file> <args...>\n")
+  (eprintf "  ops: set, unset, enable-add, enable-remove\n")
   (exit 2))
 
 (define op (car args))
@@ -68,6 +71,35 @@
      [else
       (write-file file updated)
       (printf "unset ~a in ~a\n" path file)])]
+  [("enable-add")
+   (when (not (= (length rest) 2))
+     (eprintf "usage: nisp-edit enable-add <file> <option-path>\n")
+     (exit 2))
+   (define file (car rest))
+   (define path (cadr rest))
+   (define src (read-file file))
+   (define updated (edit-enable-add src path))
+   (cond
+     [(equal? src updated)
+      (printf "~a already enabled in ~a\n" path file)]
+     [else
+      (write-file file updated)
+      (printf "enabled ~a in ~a\n" path file)])]
+  [("enable-remove")
+   (when (not (= (length rest) 2))
+     (eprintf "usage: nisp-edit enable-remove <file> <option-path>\n")
+     (exit 2))
+   (define file (car rest))
+   (define path (cadr rest))
+   (define src (read-file file))
+   (define updated (edit-enable-remove src path))
+   (cond
+     [(equal? src updated)
+      (eprintf "~a not in any (enable …) form in ~a\n" path file)
+      (exit 1)]
+     [else
+      (write-file file updated)
+      (printf "removed ~a from (enable …) in ~a\n" path file)])]
   [else
-   (eprintf "unknown op: ~a (expected: set | unset)\n" op)
+   (eprintf "unknown op: ~a (expected: set | unset | enable-add | enable-remove)\n" op)
    (exit 2)])

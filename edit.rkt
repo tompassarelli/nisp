@@ -23,6 +23,8 @@
 
 (provide edit-set
          edit-unset
+         edit-enable-add
+         edit-enable-remove
          find-set-form-positions)
 
 ;; ---------- locate (set 'PATH …) and (set PATH …) forms ----------
@@ -233,6 +235,199 @@
      (string-append (substring src 0 ws-start)
                     "\n" prev-indent new-form
                     (substring src ws-start))]))
+
+;; ============================================================================
+;; (enable …) form manipulation
+;; ============================================================================
+;;
+;; `(enable a b c)` is nisp's variadic-args form for toggling option paths
+;; on. enable-add appends a path to an existing form (or inserts a new one
+;; if none exists). enable-remove drops a path; if it was the only arg,
+;; the form is deleted entirely. Idempotent: enable-add a path that's
+;; already present is a no-op; same for enable-remove on an absent path.
+
+;; Returns a list of `(start end args)` for every `(enable …)` form.
+;; `start`/`end` are byte offsets; `args` is a list of (arg-text start end)
+;; tuples for the path arguments.
+(define (find-enable-forms src)
+  (define out '())
+  (walk-source-forms src
+    (λ (s)
+      (define lst (syntax->list s))
+      (when (and lst (pair? lst)
+                 (identifier? (car lst))
+                 (eq? (syntax->datum (car lst)) 'enable))
+        (define start (sub1 (syntax-position s)))
+        (define span (syntax-span s))
+        (define args
+          (for/list ([arg (in-list (cdr lst))])
+            (define arg-start (sub1 (syntax-position arg)))
+            (define arg-end (+ arg-start (syntax-span arg)))
+            (define text (substring src arg-start arg-end))
+            (list text arg-start arg-end)))
+        (set! out (cons (list start (+ start span) args) out)))))
+  (reverse out))
+
+(define (path-arg-text->path text)
+  ;; Both `'foo.bar` and `foo.bar` (bare) are valid; strip leading quote.
+  (regexp-replace #rx"^'" text ""))
+
+(define (edit-enable-add src path)
+  ;; If `path` already appears in any `(enable …)` form, no-op.
+  ;; Otherwise: append `path` to the LAST existing `(enable …)` form,
+  ;; or insert a new `(enable path)` form if none exist.
+  (define forms (find-enable-forms src))
+  (cond
+    [(any-form-contains-path? forms path) src]
+    [(null? forms)
+     (insert-enable-form src path)]
+    [else
+     ;; Append to the LAST (enable …) form, before its closing paren.
+     ;; Detect formatting style: if the existing args span multiple lines,
+     ;; insert with the same indentation (matched to the last arg's column);
+     ;; otherwise inline with a single space.
+     (define target (last forms))
+     (define-values (start end args) (apply values target))
+     (define close-pos (sub1 end))
+     (define form-text (substring src start end))
+     (define separator
+       (cond
+         [(null? args) " "]
+         [(not (regexp-match? #rx"\n" form-text))
+          ;; Single-line form → inline append.
+          " "]
+         [else
+          ;; Multi-line form — match the last arg's column.
+          (define last-arg-start (cadr (last args)))
+          (define line-start
+            (let loop ([i (sub1 last-arg-start)])
+              (cond
+                [(or (negative? i) (char=? (string-ref src i) #\newline)) (+ i 1)]
+                [else (loop (- i 1))])))
+          (define indent (substring src line-start last-arg-start))
+          (string-append "\n" indent)]))
+     (string-append (substring src 0 close-pos)
+                    separator path
+                    (substring src close-pos))]))
+
+(define (edit-enable-remove src path)
+  ;; Find any `(enable …)` form that has `path` (or `'path`) as an arg.
+  ;; Remove the arg. If the form's only arg was `path`, remove the
+  ;; entire form. No-op if `path` not present anywhere.
+  (define forms (find-enable-forms src))
+  (define matching
+    (for/list ([f (in-list forms)]
+               #:when (form-contains-path? f path))
+      f))
+  (cond
+    [(null? matching) src]
+    [else
+     ;; Process from latest position to earliest so offsets stay valid.
+     (define sorted (sort matching > #:key car))
+     (for/fold ([acc src]) ([f (in-list sorted)])
+       (define-values (start end args) (apply values f))
+       (define remaining
+         (filter (λ (a) (not (path-matches? (car a) path))) args))
+       (cond
+         [(null? remaining)
+          ;; Form becomes empty — remove it (with leading whitespace cleanup).
+          (define real-start
+            (let loop ([i start])
+              (cond
+                [(zero? i) i]
+                [(char=? (string-ref acc (- i 1)) #\newline) i]
+                [(char-whitespace? (string-ref acc (- i 1))) (loop (- i 1))]
+                [else i])))
+          (define real-end
+            (let loop ([i end])
+              (cond
+                [(>= i (string-length acc)) i]
+                [(char=? (string-ref acc i) #\newline) (+ i 1)]
+                [(char-whitespace? (string-ref acc i)) (loop (+ i 1))]
+                [else i])))
+          (string-append (substring acc 0 real-start)
+                         (substring acc real-end))]
+         [else
+          ;; Surgical removal: cut just the matching arg + its preceding
+          ;; whitespace. This preserves the original formatting (multi-line
+          ;; vs single-line) of the surrounding form.
+          (define matching-arg
+            (findf (λ (a) (path-matches? (car a) path)) args))
+          (define-values (_text arg-start arg-end) (apply values matching-arg))
+          ;; Walk back through whitespace to consume the preceding gap.
+          (define cut-start
+            (let loop ([i arg-start])
+              (cond
+                [(<= i (+ start 8))   ; "(enable " is 8 chars; don't cross
+                 i]
+                [(char-whitespace? (string-ref acc (- i 1))) (loop (- i 1))]
+                [else i])))
+          ;; If we ended up consuming back to "(enable" itself, leave one
+          ;; space so the result is "(enable rest…)" not "(enablerest…)".
+          (define final-cut-start
+            (cond [(and (>= cut-start (+ start 8))
+                        (char-whitespace? (string-ref acc (sub1 cut-start))))
+                   cut-start]
+                  [else (+ cut-start 0)]))
+          ;; Special case: removing the FIRST arg leaves leading whitespace
+          ;; after "(enable" — cut from arg-end forward instead.
+          (define is-first-arg?
+            (equal? matching-arg (car args)))
+          (cond
+            [is-first-arg?
+             ;; Cut "(enable" + (any whitespace) + arg + (whitespace
+             ;; up to next arg) → "(enable" + (one space) + next-arg-start
+             (define after-arg-start
+               (let loop ([i arg-end])
+                 (cond
+                   [(>= i (string-length acc)) i]
+                   [(char-whitespace? (string-ref acc i)) (loop (+ i 1))]
+                   [else i])))
+             (string-append (substring acc 0 arg-start)
+                            (substring acc after-arg-start))]
+            [else
+             (string-append (substring acc 0 final-cut-start)
+                            (substring acc arg-end))])]))]))
+
+(define (any-form-contains-path? forms path)
+  (for/or ([f (in-list forms)]) (form-contains-path? f path)))
+
+(define (form-contains-path? form path)
+  (define args (caddr form))
+  (for/or ([a (in-list args)]) (path-matches? (car a) path)))
+
+(define (path-matches? arg-text path)
+  (equal? (path-arg-text->path arg-text) path))
+
+(define (insert-enable-form src path)
+  ;; Insert (enable PATH) on its own line. Strategy mirrors
+  ;; insert-set-after-last-set: find the last existing top-level form
+  ;; and insert after it; fall back to before the file's outermost close.
+  (define matches (find-all-set-form-positions src))
+  (define enable-form (format "(enable ~a)" path))
+  (cond
+    [(pair? matches)
+     ;; Insert after the last set form.
+     (define last-end (cdar (reverse matches)))
+     (define last-line-start
+       (let loop ([i (sub1 (caar (reverse matches)))])
+         (cond
+           [(or (negative? i) (char=? (string-ref src i) #\newline)) (+ i 1)]
+           [else (loop (- i 1))])))
+     (define indent-end
+       (let loop ([i last-line-start])
+         (cond
+           [(>= i (string-length src)) i]
+           [(char-whitespace? (string-ref src i))
+            (cond [(char=? (string-ref src i) #\newline) i]
+                  [else (loop (+ i 1))])]
+           [else i])))
+     (define indent (substring src last-line-start indent-end))
+     (string-append (substring src 0 last-end)
+                    "\n" indent enable-form
+                    (substring src last-end))]
+    [else
+     (insert-set-before-final-close src enable-form)]))
 
 (define (find-final-close-paren src)
   ;; Walk the source tracking paren depth (skipping strings/comments)
