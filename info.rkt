@@ -1,0 +1,10 @@
+#lang info
+(define collection "nisp")
+(define version "0.1.0")
+(define deps '("base"))
+(define build-deps '("rackunit-lib"))
+(define pkg-desc "An s-expression DSL that compiles to the Nix language")
+(define pkg-authors '(tompassarelli))
+(define license '(MIT))
+(define racket-launcher-libraries '())
+(define test-omit-paths '("examples"))

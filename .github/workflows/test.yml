@@ -1,0 +1,25 @@
+name: Test
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Racket
+        uses: Bogdanp/setup-racket@v1.11
+        with:
+          version: '8.18'
+
+      - name: Link nisp package
+        run: |
+          raco pkg install --auto --batch --link --force .
+          raco setup nisp
+
+      - name: Run tests
+        run: raco test tests/
