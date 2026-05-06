@@ -842,7 +842,7 @@
 ;;   - sub-modules:   (sub-modules 'vim 'git ...)
 ;;   - sub-modules*:  (sub-modules* ('foo #t) ...)
 (define-syntax (mod-clause stx)
-  (syntax-case stx (desc extra-args lets option-attrs no-enable config-body raw-body sub-modules sub-modules*)
+  (syntax-case stx (desc extra-args lets option-attrs no-enable config-body raw-body sub-modules sub-modules* tags)
     [(_ (desc str))
      #'(cons 'desc str)]
     [(_ (extra-args sym ...))
@@ -860,7 +860,14 @@
     [(_ (sub-modules m ...))
      #'(cons 'sub-modules (list (->key m) ...))]
     [(_ (sub-modules* (m default) ...))
-     #'(cons 'sub-modules* (list (cons (->key m) default) ...))]))
+     #'(cons 'sub-modules* (list (cons (->key m) default) ...))]
+    ;; (tags name1 name2 ...) — orthogonal facets for module discovery
+    ;; (gpu-required, gui, headless-ok, network, proprietary, …).
+    ;; The clause is recorded but never emitted — tags are read from
+    ;; the source by external tooling (e.g. firn tags) which builds an
+    ;; index. Source-of-truth in the .rkt file, no sidecar database.
+    [(_ (tags t ...))
+     #'(cons 'tags (list (->key t) ...))]))
 
 ;; Build the file structure.
 (define (build-module-file kind ns name clauses)

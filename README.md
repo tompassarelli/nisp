@@ -258,7 +258,7 @@ contributor.
 
 ## Status
 
-`v0.10.0` — Language + validation library + 7 CLI tools
+`v0.11.0` — Language + validation library + 7 CLI tools
 (`nisp-validate`, `nisp-extract-schema`, `nisp-import`, `nisp-schema`,
 `nisp-rename`, `nisp-lsp`, `nisp-edit`). Full Nix surface coverage. 75
 tests. nisp output is byte-equivalent to hand-written Nix on a
@@ -266,9 +266,12 @@ real-world ~200-module config; nisp-import handles 100% of nixpkgs
 (2,332 modules) via rnix-parser. LSP provides diagnostics, hover,
 completion, code actions, and goto-definition. nisp-edit supports
 multi-arg `(enable …)` list manipulation. `nisp-validate --auto-fix`
-rewrites unambiguous option-path typos. New `(svc name)` shortcut
-mirrors `(pkg name)` for service modules. API may shift before `v1.0`
-based on usage feedback.
+rewrites unambiguous option-path typos. `(svc name)` shortcut mirrors
+`(pkg name)` for service modules. New `(tags …)` clause inside
+`module-file` records orthogonal facets (gpu-required, gui-only,
+proprietary, …) — read by external tooling for discovery, never
+emitted into the generated Nix. API may shift before `v1.0` based on
+usage feedback.
 
 ## License
 
