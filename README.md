@@ -1,38 +1,31 @@
 # nisp
 
-**Statically-checked Lisp for Nix.** A small Racket `#lang` that
-compiles to the Nix language, paired with a checker that catches
-unknown option paths, type mismatches, and enum violations at
-`file:line:col` precision — before `nix-build` runs.
+**Statically-checked Lisp for Nix.** A Racket `#lang` that compiles to
+Nix, paired with a checker that catches unknown option paths, type
+mismatches, and enum violations at `file:line:col` — before
+`nix-build` runs.
 
 ```
-$ nisp-validate
+$ nisp validate
 modules/printing/default.rkt:6:7: unknown option services.pipwire.alsa.enable
-  did you mean: services.pipewire.alsa.enable or services.pipewire.pulse.enable?
-modules/foo/default.rkt:9:34: type mismatch at services.openssh.enable:
-  expected bool, got string
+  did you mean: services.pipewire.alsa.enable?
 hosts/laptop/configuration.rkt:11:47: type mismatch at boot.loader.systemd-boot.consoleMode:
-  "atuo" not in enum {"0", "1", "2", "5", "auto", "max", "keep"} — did you mean "auto"?
+  "atuo" not in enum {"0", "1", "2", "auto", "max", "keep"} — did you mean "auto"?
 ```
 
-The reason this works isn't the parens — it's that compiling from an
-eager language to a lazy one buys you something Nix itself can't
-easily do: a walkable AST stage *before* emission. NixOS validates
-option paths and types too, but only during module evaluation, by
-which point the original authoring context has been discarded and
-errors point at the force site instead of the mistake. nisp validates
-earlier, against the concrete source AST, with the option schema NixOS
-already publishes.
+NixOS validates option paths and types too, but only during module
+evaluation — by then the authoring context is gone and errors point at
+the force site, not the mistake. Compiling from an eager language to a
+lazy one buys you a walkable AST stage *before* emission. nisp
+validates there, against the schema NixOS already publishes.
 
-> **Is this *really* statically typed?** The type system being checked
-> is NixOS's options schema, not a type system defined inside nisp —
-> so strictly, nisp is gradually typed via external schema. Closer in
-> spirit to TypeScript over JavaScript or `ajv` over JSON than to ML.
-> Practically: errors before runtime, at the source line, with
-> did-you-mean. That's the bar most people mean.
+> **Is this *really* statically typed?** The type system being
+> checked is NixOS's options schema, not one defined inside nisp — so
+> strictly, gradually typed via external schema. Closer to TypeScript
+> over JavaScript than to ML. Practically: errors before runtime, at
+> the source line, with did-you-mean.
 
-The DSL itself is small and predictable — every Nix construct has a
-form, mappings are mechanical:
+## A taste
 
 ```racket
 #lang nisp
@@ -60,90 +53,84 @@ form, mappings are mechanical:
 }
 ```
 
-Both `.rkt` source and emitted `.nix` are committed; the flake reads
+Both `.rkt` and the emitted `.nix` are committed; the flake reads
 ordinary Nix. You're not trapped — drop down to raw Nix anytime, or
 stop using nisp by deleting the `.rkt` files.
 
-## What ships
-
-- **The DSL** (`#lang nisp`) — every construct in Nix's expression grammar has a corresponding nisp form.
-- **`nisp/validate`** (library) — AST walker, value-type inference, schema-driven type checker, Levenshtein did-you-mean. Pure functions over a parsed nisp source and a schema-table.
-- **`bin/nisp-extract-schema`** — dumps an options tree (NixOS, home-manager, nix-darwin, any Nix-options-system tree) into a JSON schema cache.
-- **`bin/nisp-validate`** — discovers option-path references in your `.rkt` sources, lazy-expands submodules on demand, type-checks values, reports errors with `file:line:col` precision. `--auto-fix` rewrites unambiguous typos in place (best did-you-mean at distance ≤ 2 with a clear gap to the runner-up).
-- **`bin/nisp-import`** — convert any existing `.nix` file (or stdin) to nisp source. Built on rnix-parser (a tiny Rust shim — 100% pass rate on all 2,332 nixpkgs/nixos/modules, byte-equivalent round-trip on real-world configs). Comments preserved through the import.
-- **`bin/nisp-schema`** — query the cached options schema. Three modes:
-    - `nisp-schema services.openssh.enable` — exact lookup (type/enum/inner)
-    - `nisp-schema --children services.openssh` — list all sub-options under a prefix
-    - `nisp-schema --search ssh` — fuzzy substring search across all 16k+ paths
-
-  All three accept `--json` for machine-readable output.
-- **`bin/nisp-rename`** — rename an option path across every `.rkt` in the flake. Word-boundary matching avoids partial collisions; `--dry-run` previews. Skips matches inside string literals.
-- **`bin/nisp-lsp`** — Language Server Protocol implementation. Diagnostics (real-time validation), hover (option type/enum), completion (option-path autocomplete), code actions (one-click apply did-you-mean), goto-definition (jump from option path to its NixOS module source). Speaks LSP over stdio.
-- **`bin/nisp-edit`** — programmatic edits to nisp source files. Source-text-preserving (uses Racket's read-syntax for AST positions, does text-level surgery). Operations: `set`/`unset` for `(set 'PATH val)` forms, `enable-add`/`enable-remove` for `(enable a b c)` multi-arg list manipulation. Comments and formatting outside the edit region are preserved.
-
-  Editor configs:
-
-  ```elisp
-  ;; Doom Emacs (lsp-mode):
-  (after! lsp-mode
-    (add-to-list 'lsp-language-id-configuration '(racket-mode . "nisp"))
-    (lsp-register-client
-     (make-lsp-client :new-connection (lsp-stdio-connection "nisp-lsp")
-                      :major-modes '(racket-mode)
-                      :server-id 'nisp-lsp)))
-  ```
-
-  ```toml
-  # Helix (languages.toml):
-  [language-server.nisp]
-  command = "nisp-lsp"
-
-  [[language]]
-  name = "racket"
-  language-servers = ["nisp"]
-  ```
-
-  ```lua
-  -- Neovim (lspconfig):
-  require'lspconfig.configs'.nisp = {
-    default_config = {
-      cmd = {'nisp-lsp'},
-      filetypes = {'racket'},
-      root_dir = require'lspconfig.util'.root_pattern('flake.rkt', 'flake.nix'),
-    },
-  }
-  require'lspconfig'.nisp.setup{}
-  ```
-
-The CLIs are configurable via `--target`, `--cache-dir`, `--flake`,
-`--hm-roots`. `nixosConfigurations.<host>.options` is the default
-target — override for home-manager-only, nix-darwin, or anything else.
-
-A NixOS configuration framework built on top of all this lives separately at [firnos](https://github.com/tompassarelli/firnos) — modules, bundles, host configs, scaffolding, the `firn` CLI for daily workflow.
-
 ## Install
 
-Requires Racket 8.x. Nix is needed for `nisp-validate`'s submodule
-expansion. Cargo is needed (one-time) to build `nisp-import`'s Rust
-parser shim.
+Requires Racket 8.x. Nix is needed for `validate`'s submodule
+expansion. Cargo is needed once to build `import`'s parser shim.
 
 ```bash
 git clone https://github.com/tompassarelli/nisp
 cd nisp
 raco pkg install --link --auto
-cd nix-parser && cargo build --release && cd ..   # builds bin for nisp-import
+cd nix-parser && cargo build --release && cd ..
+export PATH="$PWD/bin:$PATH"
 ```
 
-Add `nisp/bin` to your `PATH`:
+## Usage
+
+The toolchain is a single `nisp` binary plus a `nisp-lsp` server
+(separate so editors can spawn it by name).
 
 ```bash
-export PATH="$HOME/code/nisp/bin:$PATH"
-nisp-extract-schema             # cache a schema for your current host
-nisp-validate                   # validate every .rkt in the cwd's flake
-nisp-import some-config.nix     # convert existing Nix to nisp
+nisp extract-schema           # cache the options schema for your host
+nisp validate                 # check every .rkt in the cwd's flake
+nisp import some-config.nix   # convert existing Nix to nisp
 ```
 
-## Quick reference
+Subcommands (`nisp <cmd> --help` for full options):
+
+| command | what it does |
+|---|---|
+| `nisp validate` | walk `.rkt` sources, report unknown option paths + type mismatches with did-you-mean. `--auto-fix` rewrites unambiguous typos. |
+| `nisp extract-schema` | dump an options tree (NixOS, home-manager, nix-darwin, anything `nixpkgs.lib.evalModules`-shaped) into `.nisp-cache/schema.json`. Re-run after `nix flake update`. |
+| `nisp import [file]` | translate `.nix` → `.rkt`. Built on rnix-parser; 100% pass rate on all 2,332 nixpkgs/nixos modules; comments preserved. |
+| `nisp schema <path>` | query the cached schema. `--children <prefix>` lists sub-options; `--search <query>` does fuzzy matching across all 16k+ paths. `--json` for machine-readable output. |
+| `nisp rename <old> <new>` | rename an option path across every `.rkt` in the flake. Word-boundary matching; `--dry-run` previews. |
+| `nisp edit <op> <file> ...` | programmatic, source-text-preserving edits: `set` / `unset` for `(set 'PATH val)` forms, `enable-add` / `enable-remove` for `(enable a b c)` lists. |
+| `nisp-lsp` | LSP server (separate binary). Diagnostics, hover, completion, code actions, goto-definition. |
+
+### Editor setup
+
+```elisp
+;; Doom Emacs (lsp-mode):
+(after! lsp-mode
+  (add-to-list 'lsp-language-id-configuration '(racket-mode . "nisp"))
+  (lsp-register-client
+   (make-lsp-client :new-connection (lsp-stdio-connection "nisp-lsp")
+                    :major-modes '(racket-mode)
+                    :server-id 'nisp-lsp)))
+```
+
+```toml
+# Helix (languages.toml):
+[language-server.nisp]
+command = "nisp-lsp"
+
+[[language]]
+name = "racket"
+language-servers = ["nisp"]
+```
+
+```lua
+-- Neovim (lspconfig):
+require'lspconfig.configs'.nisp = {
+  default_config = {
+    cmd = {'nisp-lsp'},
+    filetypes = {'racket'},
+    root_dir = require'lspconfig.util'.root_pattern('flake.rkt', 'flake.nix'),
+  },
+}
+require'lspconfig'.nisp.setup{}
+```
+
+## Surface forms
+
+Every Nix construct has a corresponding nisp form. Mappings are
+mechanical:
 
 | nisp | nix |
 |---|---|
@@ -163,9 +150,9 @@ nisp-import some-config.nix     # convert existing Nix to nisp
 | `(call f x y)` | `f x y` |
 | `(inh a b)` / `(inh-from ns a b)` | `inherit a b;` / `inherit (ns) a b;` |
 | `(not x)` / `(neg x)` | `!x` / `-x` |
-| `(and a b c)` / `(or a b)` / `(impl a b)` | `a && b && c` / `a \|\| b` / `a -> b` |
+| `(and a b)` / `(or a b)` / `(impl a b)` | `a && b` / `a \|\| b` / `a -> b` |
 | `(== a b)` / `(!= a b)` / `(< a b)` etc. | comparison |
-| `(+ a b c)` / `(- a b)` / `(* a b)` / `(/ a b)` | arithmetic (variadic) |
+| `(+ a b)` / `(- a b)` / `(* a b)` / `(/ a b)` | arithmetic (variadic) |
 | `(get base 'a.b.c)` | `base.a.b.c` |
 | `(get-or base 'a.b.c default)` | `base.a.b.c or default` |
 | `(has base 'a.b.c)` | `base ? a.b.c` |
@@ -176,8 +163,7 @@ nisp-import some-config.nix     # convert existing Nix to nisp
 
 ## Use as a library
 
-`nisp` exports the AST nodes and emitter so other tools can produce or
-consume nisp programs:
+The DSL exports its AST and emitter:
 
 ```racket
 (require nisp)
@@ -188,51 +174,30 @@ consume nisp programs:
     (networking.firewall.allowedTCPPorts (lst 80 443))))
 
 (displayln (emit expr 0))
-;; →
-;; {
-;;   services.openssh.enable = true;
-;;   networking.firewall.allowedTCPPorts = [ 80 443 ];
-;; }
 ```
 
-The full AST is exposed via `(struct-out ...)` for `nix-bool`,
-`nix-int`, `nix-string`, `nix-attrs`, `nix-let`, `nix-lambda`,
-`nix-binop`, `nix-unop`, `nix-select`, `nix-has-attr`, `nix-assert`, etc.
+`nisp/validate` exposes the building blocks behind `nisp validate` —
+walk a parsed source, extract option-path references, infer value
+shape, check against any schema you provide. Bring your own schema
+source; nisp doesn't care whether it came from NixOS, home-manager,
+or somewhere else.
 
-### Validation primitives
+## A NixOS framework on top
 
-`nisp/validate` provides the building blocks for source-aware
-validation: walk a parsed source, extract every option-path reference,
-infer each value's static shape, and check it against your schema:
+[firnos](https://github.com/tompassarelli/firnos) is a NixOS
+configuration framework built on nisp — modules, bundles, host
+configs, scaffolding, the `firn` CLI. If you want "Doom Emacs for
+NixOS config", that's the one.
 
-```racket
-(require nisp/validate)
+### Heads-up for downstream consumers (and AI agents)
 
-;; You provide schema-table: hash from path → entry hash with 't, 'inner, 'enum.
-(define schema-table
-  (hash "services.openssh.enable" (hasheq 't "bool")
-        "networking.firewall.allowedTCPPorts"
-        (hasheq 't "listOf" 'inner (hasheq 't "unsignedInt16"))))
-
-;; Walk syntax, validate every set/enable.
-(walk-syntax (read-syntax 'src port)
-  (λ (stx in-hm?)
-    (for ([pr (in-list (extract-from-form stx))])
-      (define p (path-ref-path pr))
-      (cond
-        [(hash-has-key? schema-table p)
-         (when (path-ref-val-stx pr)
-           (define vt (infer-value-type (path-ref-val-stx pr)))
-           (define result (check-type (hash-ref schema-table p) vt))
-           (when (and (pair? result) (eq? (car result) 'mismatch))
-             (eprintf "type mismatch at ~a: ~a\n" p (cadr result))))]
-        [else
-         (eprintf "unknown option ~a (did you mean: ~a?)\n"
-                  p (find-similar-strs p (hash-keys schema-table)))]))))
-```
-
-Bring your own schema source — the NixOS options tree, a home-manager
-options dump, your own custom config schema. nisp doesn't care.
+A nisp-based repo typically commits **both** the `.rkt` and the
+generated `.nix` next to each other. The flake reads the `.nix`, but
+the `.nix` is a build artifact — regenerating from the `.rkt` will
+overwrite direct `.nix` edits. **Always edit the `.rkt`.** Add a
+`CLAUDE.md` / `AGENTS.md` to your config repo saying so explicitly,
+since agents reaching in via absolute path from a different working
+directory may not auto-load the file.
 
 ## Tests
 
@@ -240,38 +205,20 @@ options dump, your own custom config schema. nisp doesn't care.
 raco test tests/
 ```
 
-30 rackunit cases covering every AST node and surface form.
-
-## Companion projects
-
-- **[firnos](https://github.com/tompassarelli/firnos)** — a NixOS
-  configuration framework built on nisp, with a schema-aware validator
-  (`firn-validate`), CLI (`firn`), and module/bundle conventions. If
-  you want "Doom Emacs for NixOS config", that's the one.
-
 ## Working on nisp itself
 
-See [AGENTS.md](AGENTS.md) for the agent-targeted context: repo layout,
-how to add a new DSL form / CLI / LSP capability, release process, and
-the don't-do list. Aimed at AI coding agents but useful for any
-contributor.
+See [AGENTS.md](AGENTS.md) — repo layout, how to add a new DSL form /
+subcommand / LSP capability, release process. Aimed at AI coding
+agents but useful for any contributor.
 
 ## Status
 
-`v0.11.0` — Language + validation library + 7 CLI tools
-(`nisp-validate`, `nisp-extract-schema`, `nisp-import`, `nisp-schema`,
-`nisp-rename`, `nisp-lsp`, `nisp-edit`). Full Nix surface coverage. 75
-tests. nisp output is byte-equivalent to hand-written Nix on a
-real-world ~200-module config; nisp-import handles 100% of nixpkgs
-(2,332 modules) via rnix-parser. LSP provides diagnostics, hover,
-completion, code actions, and goto-definition. nisp-edit supports
-multi-arg `(enable …)` list manipulation. `nisp-validate --auto-fix`
-rewrites unambiguous option-path typos. `(svc name)` shortcut mirrors
-`(pkg name)` for service modules. New `(tags …)` clause inside
-`module-file` records orthogonal facets (gpu-required, gui-only,
-proprietary, …) — read by external tooling for discovery, never
-emitted into the generated Nix. API may shift before `v1.0` based on
-usage feedback.
+`v0.12.0` — single-binary CLI (`nisp <subcommand>`) plus `nisp-lsp`.
+Full Nix surface coverage. 77 tests. Output is byte-equivalent to
+hand-written Nix on a real-world ~200-module config; `nisp import`
+handles 100% of nixpkgs (2,332 modules) via rnix-parser. LSP provides
+diagnostics, hover, completion, code actions, goto-definition. API
+may shift before `v1.0` based on usage feedback.
 
 ## License
 

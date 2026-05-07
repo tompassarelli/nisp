@@ -1,19 +1,13 @@
-#!/usr/bin/env racket
 #lang racket/base
 
-;; nisp-import — translate Nix source → nisp source.
+;; nisp import — translate Nix source → nisp source.
 ;;
-;; Pipeline:
-;;   stdin/file → nisp-nix-parser (Rust shim wrapping rnix) → JSON AST
-;;             → this Racket code walks JSON → emits nisp source on stdout
-;;
-;; The rnix-based parser handles 100% of nixpkgs cleanly (via rowan tree;
-;; tolerant to syntax errors with recovery). This script focuses on the
-;; AST → nisp source mapping, which is where the real work lives.
+;; Pipeline: stdin/file → nisp-nix-parser (Rust shim wrapping rnix) → JSON AST
+;;        → this Racket code walks JSON → emits nisp source on stdout
 ;;
 ;; Usage:
-;;   nisp-import file.nix > file.rkt
-;;   echo "{ a = 1; }" | nisp-import > foo.rkt
+;;   nisp import file.nix > file.rkt
+;;   echo "{ a = 1; }" | nisp import > foo.rkt
 
 (require racket/cmdline
          racket/string
@@ -23,7 +17,7 @@
          racket/runtime-path
          json)
 
-;; ---------- locate the Rust shim ----------
+(provide main)
 
 (define-runtime-path THIS-DIR ".")
 
@@ -31,39 +25,17 @@
   (list (build-path THIS-DIR ".." "nix-parser" "target" "release" "nisp-nix-parser")
         (build-path THIS-DIR ".." "nix-parser" "target" "debug" "nisp-nix-parser")))
 
-(define PARSER-BIN
+(define (locate-parser-bin)
   (or (for/or ([p (in-list PARSER-CANDIDATES)])
         (and (file-exists? p) p))
       (find-executable-path "nisp-nix-parser")
       (begin
-        (eprintf "nisp-import: nisp-nix-parser binary not found.\n")
+        (eprintf "nisp import: nisp-nix-parser binary not found.\n")
         (eprintf "  expected at: ~a\n" (path->string (car PARSER-CANDIDATES)))
         (eprintf "  build it:    cd nix-parser && cargo build --release\n")
         (exit 2))))
 
-;; ---------- args ----------
-
-(define WRAP-RAW-FILE? (make-parameter #t))
-(define LANG-LINE? (make-parameter #t))
-
-(define files-arg
-  (command-line
-   #:program "nisp-import"
-   #:once-each
-   [("--no-wrap") "Don't wrap output in (raw-file ...). Just emit the bare expression."
-    (WRAP-RAW-FILE? #f)]
-   [("--no-lang") "Don't prepend the #lang nisp line."
-    (LANG-LINE? #f)]
-   #:args files
-   files))
-
 ;; ---------- comment threading ----------
-;;
-;; Pending-comments is a list of comment hashes in source order. When
-;; emitting a structural boundary (attrset entry, list item, top-level),
-;; we flush pending comments whose start position is before the upcoming
-;; node's start.
-
 (define PENDING-COMMENTS (make-parameter '()))
 
 (define (comment-start c) (hash-ref (hash-ref c 'pos) 'start))
@@ -73,9 +45,10 @@
                  (and p (hash-ref p 'start #f)))]
     [else #f]))
 
+(define INDENT "  ")
+(define (indent n) (apply string-append (build-list n (λ (_) INDENT))))
+
 (define (flush-comments-before! node-pos depth)
-  ;; Returns a string containing any comments whose start < node-pos.
-  ;; Comments are formatted as `;;` lines (Racket convention).
   (cond
     [(not node-pos) ""]
     [else
@@ -103,17 +76,13 @@
   out)
 
 (define (format-comment c ind)
-  ;; Convert Nix `# foo` and `/* foo */` to Racket `;; foo` (potentially
-  ;; multi-line for block comments).
   (define text (hash-ref c 'text))
   (define kind (hash-ref c 'kind "line"))
   (cond
     [(equal? kind "line")
-     ;; Strip the leading `#` and any leading space.
      (define stripped (regexp-replace #px"^#\\s?" text ""))
      (format "~a;; ~a\n" ind stripped)]
     [else
-     ;; Block comment: strip /* and */, emit each interior line as a `;;`
      (define inner (regexp-replace #px"^/\\*\\s?" text ""))
      (define inner2 (regexp-replace #px"\\s?\\*/$" inner ""))
      (define lines (regexp-split #rx"\n" inner2))
@@ -123,11 +92,9 @@
 
 ;; ---------- run the parser, get JSON ----------
 
-(define (run-parser source-text)
-  (define out (open-output-string))
-  (define err (open-output-string))
+(define (run-parser parser-bin source-text)
   (define-values (sub sub-out sub-in sub-err)
-    (subprocess #f #f #f (path->string PARSER-BIN)))
+    (subprocess #f #f #f (path->string parser-bin)))
   (write-string source-text sub-in)
   (close-output-port sub-in)
   (define out-str (port->string sub-out))
@@ -139,23 +106,13 @@
     [(zero? (subprocess-status sub))
      (read-json (open-input-string out-str))]
     [else
-     (eprintf "nisp-import: parser failed:\n~a\n" err-str)
+     (eprintf "nisp import: parser failed:\n~a\n" err-str)
      (exit 1)]))
 
 ;; ---------- JSON AST → nisp source ----------
-;;
-;; We emit nisp source as text directly (not nisp AST). This gives us
-;; control over formatting without reinventing a pretty-printer.
-
-(define INDENT "  ")
-(define (indent n) (apply string-append (build-list n (λ (_) INDENT))))
 
 (define (kind-of node) (and (hash? node) (hash-ref node 'kind #f)))
 (define (->str x) (cond [(string? x) x] [(symbol? x) (symbol->string x)] [else (format "~a" x)]))
-
-(define (emit-source ast)
-  ;; Top-level entry: a single expression. Indent 0.
-  (emit-expr ast 0))
 
 (define (emit-expr node depth)
   (case (kind-of node)
@@ -179,11 +136,10 @@
     [("Assert")  (emit-assert node depth)]
     [("Paren")   (emit-expr (hash-ref node 'expr) depth)]
     [("LegacyLet")
-     ;; deprecated `let { body = ...; }` → `(rec-att ...).body`
      (format "(get (rec-att ~a) 'body)"
              (emit-entries (hash-ref node 'entries) (+ depth 1)))]
     [("Error") "(unparseable)"]
-    [(#f) "null"]   ; null in JSON
+    [(#f) "null"]
     [else (format ";; UNHANDLED: ~a" (kind-of node))]))
 
 (define (emit-ident name)
@@ -200,8 +156,6 @@
           (equal? (kind-of (car parts)) "Literal"))
      (format "(p ~s)" (hash-ref (car parts) 'text))]
     [else
-     ;; Interpolated path: build with (s "lit" expr "lit") and wrap as path.
-     ;; Simplest: emit as (p "raw-text-with-interp") preserving form.
      (format "(p ~s)"
              (apply string-append
                     (map (λ (p)
@@ -215,7 +169,6 @@
   (define indented? (hash-ref node 'indented #f))
   (cond
     [indented?
-     ;; ms — split on \n, emit one line per
      (emit-mstring parts depth)]
     [(null? parts) "(s \"\")"]
     [(and (= (length parts) 1)
@@ -231,7 +184,6 @@
      (format "(s ~a)" (string-join rendered " "))]))
 
 (define (emit-mstring parts depth)
-  ;; Reassemble parts into lines, split on \n in literal text
   (define text-parts
     (map (λ (p)
            (case (kind-of p)
@@ -240,7 +192,6 @@
          parts))
   (define joined (apply string-append text-parts))
   (define lines (string-split joined "\n"))
-  ;; Strip leading/trailing empty
   (define trimmed
     (let* ([l (if (and (pair? lines) (equal? (car lines) "")) (cdr lines) lines)]
            [l (if (and (pair? l) (equal? (last l) "")) (drop-right l 1) l)])
@@ -266,7 +217,6 @@
              (if (null? items) "" ""))]))
 
 (define (short-list? items)
-  ;; Heuristic: keep on one line if ≤ 4 items and all are scalars
   (and (<= (length items) 4)
        (andmap scalar-ish? items)))
 
@@ -300,8 +250,6 @@
               "\n"))]))
 
 (define (entry-start e)
-  ;; Use the entry's value position as a proxy (entries themselves don't
-  ;; have a top-level pos; values do).
   (case (kind-of e)
     [("AttrpathValue") (node-start (hash-ref e 'value))]
     [else #f]))
@@ -341,11 +289,6 @@
                 (string-join (map ->str names) " "))])]))
 
 (define (emit-attrpath path)
-  ;; path is a list of strings, pre-rendered by the Rust side. Bare IDs
-  ;; come as "name"; quoted Nix attrs come as "\"name\""; dynamic
-  ;; interpolated come as "${expr}". Join with dots; if any segment has
-  ;; quotes or ${, wrap as a Racket string literal so nisp's smart-split-
-  ;; dot / parse-attr-path handle the segments correctly.
   (define joined (string-join (map ->str path) "."))
   (cond
     [(or (regexp-match? #rx"\"" joined)
@@ -357,7 +300,6 @@
   (define op (hash-ref node 'op))
   (define lhs (hash-ref node 'lhs))
   (define rhs (hash-ref node 'rhs))
-  ;; Map Nix operators to nisp surface forms.
   (define form
     (case op
       [("+")  "+"]    [("-")  "-"]    [("*") "*"]    [("/") "/"]
@@ -377,7 +319,6 @@
     [else  (format "(~a ~a)" op (emit-expr e depth))]))
 
 (define (emit-apply node depth)
-  ;; Flatten left-spine of curried Apply into (call f a b c)
   (define-values (fn args) (flatten-apply node))
   (format "(call ~a~a)"
           (emit-expr fn depth)
@@ -385,7 +326,6 @@
                  (map (λ (a) (string-append " " (emit-expr a depth))) args))))
 
 (define (flatten-apply node)
-  ;; node is Apply with fn + arg. If fn is also Apply, recurse.
   (let loop ([n node] [acc '()])
     (case (kind-of n)
       [("Apply")
@@ -398,10 +338,8 @@
   (define default (hash-ref node 'default #f))
   (cond
     [(or (not default) (eq? default (json-null)))
-     ;; Plain `expr.a.b.c` — emit as (get expr 'a.b.c)
      (cond
        [(equal? (kind-of expr) "Ident")
-        ;; ident.path → emit as bare ident.path (uses #%top)
         (format "~a.~a" (hash-ref expr 'name) (emit-attrpath attrpath))]
        [else
         (format "(get ~a '~a)" (emit-expr expr depth) (emit-attrpath attrpath))])]
@@ -499,35 +437,49 @@
 
 ;; ---------- main ----------
 
-(define (process-source source-text)
-  (define result (run-parser source-text))
-  (define ast (hash-ref result 'ast))
-  (define errors (hash-ref result 'errors '()))
-  (define comments
-    ;; Sort by start position to match source order.
-    (sort (hash-ref result 'comments '()) <
-          #:key comment-start))
-  (when (not (null? errors))
-    (eprintf "nisp-import: ~a parse error(s):\n" (length errors))
-    (for ([e (in-list errors)]) (eprintf "  ~a\n" e)))
-  (parameterize ([PENDING-COMMENTS comments])
-    ;; File-leading comments: anything whose pos is before the AST root.
-    (define root-start (or (node-start ast) +inf.0))
-    (define lead (flush-comments-before! root-start 0))
-    (define body (emit-expr ast 1))
-    ;; Trailing comments after the root expression.
-    (define trail (flush-remaining-comments 0))
-    (define wrapped
-      (cond [(WRAP-RAW-FILE?) (format "(raw-file~n  ~a)~n" body)]
-            [else (string-append body "\n")]))
-    (define final
-      (cond [(LANG-LINE?) (string-append "#lang nisp\n\n" lead wrapped trail)]
-            [else (string-append lead wrapped trail)]))
-    (display final)))
+(define (main)
+  (define WRAP-RAW-FILE? (make-parameter #t))
+  (define LANG-LINE? (make-parameter #t))
 
-(cond
-  [(null? files-arg)
-   (process-source (port->string (current-input-port)))]
-  [else
-   (for ([f (in-list files-arg)])
-     (process-source (call-with-input-file f port->string)))])
+  (define files-arg
+    (command-line
+     #:program "nisp import"
+     #:once-each
+     [("--no-wrap") "Don't wrap output in (raw-file ...). Just emit the bare expression."
+      (WRAP-RAW-FILE? #f)]
+     [("--no-lang") "Don't prepend the #lang nisp line."
+      (LANG-LINE? #f)]
+     #:args files
+     files))
+
+  (define parser-bin (locate-parser-bin))
+
+  (define (process-source source-text)
+    (define result (run-parser parser-bin source-text))
+    (define ast (hash-ref result 'ast))
+    (define errors (hash-ref result 'errors '()))
+    (define comments
+      (sort (hash-ref result 'comments '()) <
+            #:key comment-start))
+    (when (not (null? errors))
+      (eprintf "nisp import: ~a parse error(s):\n" (length errors))
+      (for ([e (in-list errors)]) (eprintf "  ~a\n" e)))
+    (parameterize ([PENDING-COMMENTS comments])
+      (define root-start (or (node-start ast) +inf.0))
+      (define lead (flush-comments-before! root-start 0))
+      (define body (emit-expr ast 1))
+      (define trail (flush-remaining-comments 0))
+      (define wrapped
+        (cond [(WRAP-RAW-FILE?) (format "(raw-file~n  ~a)~n" body)]
+              [else (string-append body "\n")]))
+      (define final
+        (cond [(LANG-LINE?) (string-append "#lang nisp\n\n" lead wrapped trail)]
+              [else (string-append lead wrapped trail)]))
+      (display final)))
+
+  (cond
+    [(null? files-arg)
+     (process-source (port->string (current-input-port)))]
+    [else
+     (for ([f (in-list files-arg)])
+       (process-source (call-with-input-file f port->string)))]))

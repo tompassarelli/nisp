@@ -2,7 +2,7 @@
 
 ;; nisp/validate-cache — schema loading + lazy submodule expansion.
 ;;
-;; Shared by nisp-validate (CLI), lsp.rkt, nisp-schema (CLI). Each was
+;; Shared by cli/validate.rkt, lsp.rkt, cli/schema.rkt. Each was
 ;; reimplementing this layer; consolidating here.
 ;;
 ;; Responsibilities:

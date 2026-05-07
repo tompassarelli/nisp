@@ -1,0 +1,72 @@
+#!/usr/bin/env racket
+#lang racket/base
+
+;; nisp — single-binary dispatcher for the nisp toolchain.
+;;
+;; Subcommands:
+;;   validate         schema-driven validation of .rkt sources
+;;   extract-schema   dump options tree → JSON cache
+;;   import           Nix → nisp source
+;;   schema           query the cached options schema
+;;   rename           rename an option path across .rkt files
+;;   edit             programmatic source edits (set/unset/enable-add/remove)
+;;
+;; The LSP server is shipped as a separate `nisp-lsp` binary because
+;; editors spawn LSPs by exact executable name.
+
+(require racket/list)
+
+(define VERSION "0.12.0")
+
+(define HELP #<<EOF
+usage: nisp <subcommand> [args...]
+
+subcommands:
+  validate         schema-check .rkt sources (option paths + value types)
+  extract-schema   dump options tree → JSON cache (run before `validate`)
+  import           translate a .nix file to .rkt
+  schema           query the cached options schema (lookup/--children/--search)
+  rename           rename an option path across all .rkt files in the flake
+  edit             programmatic edits: set | unset | enable-add | enable-remove
+
+  --help, -h       show this message
+  --version        print version
+
+run `nisp <subcommand> --help` for per-subcommand options.
+
+the LSP server ships as a separate `nisp-lsp` executable.
+
+EOF
+  )
+
+(define (dispatch)
+  (define args (vector->list (current-command-line-arguments)))
+  (cond
+    [(or (null? args) (member (car args) '("-h" "--help" "help")))
+     (display HELP)
+     (exit 0)]
+    [(member (car args) '("-v" "--version" "version"))
+     (printf "nisp ~a\n" VERSION)
+     (exit 0)]
+    [else
+     (define sub (car args))
+     (define rest (list->vector (cdr args)))
+     (define mod
+       (case sub
+         [("validate")        'nisp/cli/validate]
+         [("extract-schema")  'nisp/cli/extract-schema]
+         [("import")          'nisp/cli/import]
+         [("schema")          'nisp/cli/schema]
+         [("rename")          'nisp/cli/rename]
+         [("edit")            'nisp/cli/edit]
+         [else #f]))
+     (cond
+       [(not mod)
+        (eprintf "nisp: unknown subcommand: ~a\n\n" sub)
+        (display HELP (current-error-port))
+        (exit 2)]
+       [else
+        (parameterize ([current-command-line-arguments rest])
+          ((dynamic-require mod 'main)))])]))
+
+(dispatch)

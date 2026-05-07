@@ -1,7 +1,7 @@
 // nisp-nix-parser — tiny shim over rnix-parser.
 //
 // Reads a Nix source file from stdin (or a path arg), parses with rnix,
-// emits the AST as JSON on stdout. The Racket-side nisp-import consumes
+// emits the AST as JSON on stdout. The Racket-side `nisp import` consumes
 // this JSON and translates it to nisp source.
 //
 // JSON schema: every node is `{ "kind": "...", ...fields }`. Position

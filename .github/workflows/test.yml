@@ -36,7 +36,7 @@ jobs:
             | ./nix-parser/target/release/nisp-nix-parser \
             | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['ast']['kind']=='AttrSet', d; print('ok')"
 
-      - name: Round-trip nisp-import on synthetic samples
+      - name: Round-trip `nisp import` on synthetic samples
         # Each sample: parse Nix → emit nisp source → emit nix from nisp →
         # check it parses back as valid Nix (semantic equivalence proxy).
         run: |
@@ -49,7 +49,7 @@ jobs:
             'with pkgs; { environment.systemPackages = [ vim git ]; }' \
           ; do
             echo "$sample" > /tmp/roundtrip/in.nix
-            ./bin/nisp-import /tmp/roundtrip/in.nix > /tmp/roundtrip/out.rkt
+            ./bin/nisp import /tmp/roundtrip/in.nix > /tmp/roundtrip/out.rkt
             # Verify the .rkt parses + emits without error
             racket /tmp/roundtrip/out.rkt > /tmp/roundtrip/out.nix
             # Verify the result is non-empty and parses as Nix again

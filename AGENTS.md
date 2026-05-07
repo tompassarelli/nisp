@@ -18,22 +18,28 @@ programmatic editor.
 ├── lang/reader.rkt       #lang-reader hook
 ├── info.rkt              Racket package metadata + version
 ├── validate.rkt          validation library (AST walk, infer, type-check)
+├── validate-cache.rkt    schema loading + lazy submodule expansion
 ├── lsp.rkt               LSP server (consumes validate)
 ├── edit.rkt              programmatic source-edit library (set/unset)
+├── cli/                  per-subcommand modules; each provides `main`
+│   ├── validate.rkt          schema-driven .rkt validation
+│   ├── extract-schema.rkt    dump options tree → JSON cache
+│   ├── import.rkt            .nix → .rkt (calls Rust shim)
+│   ├── schema.rkt            query schema (lookup/children/search)
+│   ├── rename.rkt            rename option path across .rkt files
+│   └── edit.rkt              programmatic set/unset/enable-add/remove
 ├── bin/
-│   ├── nisp-validate         CLI: walk .rkt sources, validate paths/types
-│   ├── nisp-extract-schema   CLI: dump options-tree to JSON cache (bash)
-│   ├── nisp-import           CLI: .nix → .rkt (calls Rust shim)
-│   ├── nisp-schema           CLI: query schema (lookup/children/search)
-│   ├── nisp-rename           CLI: rename option path across .rkt files
-│   ├── nisp-edit             CLI: programmatic set/unset
-│   └── nisp-lsp              LSP launcher (calls (start-lsp))
+│   ├── nisp                  dispatcher: `nisp <subcommand> [args...]`
+│   └── nisp-lsp              LSP launcher (separate so editors spawn by name)
 ├── nix-parser/           Rust crate wrapping rnix-parser
 │   ├── src/main.rs           parses Nix, emits JSON AST + comments
-│   └── Cargo.toml            cargo build --release before nisp-import works
+│   └── Cargo.toml            cargo build --release before `nisp import` works
 ├── tests/                rackunit suite
 │   ├── emit-test.rkt         covers every AST node + surface form
-│   └── validate-test.rkt     covers validation library
+│   ├── validate-test.rkt     covers validation library
+│   ├── edit-test.rkt         covers edit primitives
+│   ├── cli-test.rkt          dispatcher + subcommand smoke tests
+│   └── lsp-test.rkt          subprocess JSON-RPC tests for nisp-lsp
 └── examples/             runnable .rkt examples
 ```
 
@@ -42,9 +48,9 @@ programmatic editor.
 ```bash
 raco pkg install --link --auto    # one-time; links this dir as the nisp pkg
 raco setup nisp                   # rebuild after edits
-raco test tests/                  # run the suite (47 tests)
+raco test tests/                  # run the suite (77 tests)
 
-cd nix-parser && cargo build --release   # required for nisp-import
+cd nix-parser && cargo build --release   # required for `nisp import`
 ```
 
 ## Adding a new surface form to the DSL
@@ -77,23 +83,32 @@ Gotchas:
   ops. If you need Racket's behavior inside main.rkt itself, use
   `racket/base`'s versions.
 
-## Adding a new CLI tool
+## Adding a new subcommand
 
-Pattern: `bin/nisp-<name>` is an executable Racket script with a
-shebang line. Keep them as standalone scripts (not raco-launchers) so
-they work via PATH without raco-pkg setup.
+The user-facing CLI is a single `nisp` dispatcher (`bin/nisp`) plus a
+separate `nisp-lsp` (kept separate so editors can spawn it by exact
+executable name). Each subcommand is a `cli/<name>.rkt` library that
+provides `main`. The dispatcher slices off the subcommand argument
+and `parameterize`s `current-command-line-arguments`, then
+`dynamic-require`s the module's `main`.
 
-```racket
-#!/usr/bin/env racket
-#lang racket/base
+To add a subcommand:
 
-(require racket/cmdline ...)
-;; arg parsing
-;; implementation
-```
+1. **New module**: `cli/<name>.rkt`. Use `#lang racket/base` (no
+   shebang — it's a library). Wrap the body in `(define (main) ...)`
+   and `(provide main)`. Keep arg-parsing inside `main` so
+   `command-line` reads from the dispatcher's parameterized
+   `current-command-line-arguments`. Use `#:program "nisp <name>"` so
+   usage strings match the user-facing form.
+2. **Register**: add a case to `dispatch` in `bin/nisp`, including a
+   one-line entry in `HELP`.
+3. **Document**: add a row to README's subcommand table.
+4. **Test**: add a smoke case to `tests/cli-test.rkt`. Invoke through
+   `run-nisp` (which calls `bin/nisp <subcommand>`), not the module
+   directly — the test should exercise the dispatcher path.
 
-`chmod +x` the script. Add to README's "What ships". Add to firnos's
-claude.md if it's the kind of operation an agent would use frequently.
+Don't reach for new top-level binaries unless there's a real reason
+(`nisp-lsp` qualifies — editors spawn LSPs by exact name).
 
 ## Adding LSP capability
 
@@ -140,35 +155,39 @@ to fix release ordering — see firnos's commit history for the rationale.
   the server and rely on isolation per spawn. Module-level mutables are
   OK (documents, schema-table) because each subprocess has its own
   instance.
-- **Don't bypass `nisp/validate` primitives in lsp.rkt or new CLIs.**
-  That module is the canonical source for path-walking, type-checking,
-  did-you-mean. Reusing it keeps behavior consistent across the
-  toolchain.
+- **Don't bypass `nisp/validate` primitives in lsp.rkt or new
+  subcommands.** That module is the canonical source for
+  path-walking, type-checking, did-you-mean. Reusing it keeps
+  behavior consistent across the toolchain.
+- **Don't reintroduce per-tool binaries.** The toolchain is
+  intentionally a single `nisp` dispatcher (plus `nisp-lsp` for
+  editor spawn-by-name). New tools become `cli/<name>.rkt`
+  subcommands.
 
 ## Where things connect
 
-- `validate.rkt` is the kernel. `nisp-validate`, `lsp.rkt`, and any
-  future tooling that checks `.rkt` files should `(require nisp/validate)`
-  rather than reimplementing.
+- `validate.rkt` is the kernel. `cli/validate.rkt`, `lsp.rkt`, and
+  any future tooling that checks `.rkt` files should
+  `(require nisp/validate)` rather than reimplementing.
 - `main.rkt` defines the AST. Anyone constructing nisp from outside
   (importer, LSP code-actions emitting source, future code-generators)
   should produce values via the surface forms, not raw struct
   construction.
 - The Rust shim is the only foreign-language component. Its JSON output
   format is the wire protocol — adding fields is non-breaking, removing
-  or renaming is breaking. Update `bin/nisp-import` in lockstep.
+  or renaming is breaking. Update `cli/import.rkt` in lockstep.
 
 ## Useful one-liners
 
 ```bash
 # Round-trip test: import every .nix in a target repo, re-emit, diff
 for f in $(find /target -name "*.nix"); do
-  bin/nisp-import "$f" 2>/dev/null | racket -I racket/base /dev/stdin > /tmp/out 2>/dev/null
+  bin/nisp import "$f" 2>/dev/null | racket -I racket/base /dev/stdin > /tmp/out 2>/dev/null
   diff -q "$f" /tmp/out
 done
 
 # Time the schema extractor (should be ~3s for whiterabbit's tree)
-time bin/nisp-extract-schema --target nixosConfigurations.whiterabbit.options --flake /home/tom/code/nixos-config
+time bin/nisp extract-schema --target nixosConfigurations.whiterabbit.options --flake /home/tom/code/nixos-config
 
 # Smoke-test the LSP via stdio (see commit history for the python harness)
 ```

@@ -8,7 +8,7 @@
 ;; Capabilities (v0.6.0):
 ;;   - textDocument/publishDiagnostics: unknown options, type mismatches,
 ;;     enum violations, attrsOf-leaf nesting bugs — same checks as
-;;     nisp-validate, surfaced as LSP diagnostics
+;;     `nisp validate`, surfaced as LSP diagnostics
 ;;   - textDocument/hover: hovering over an option path returns its
 ;;     schema entry (type, default, enum)
 ;;   - textDocument/completion: typing a partial option path returns
