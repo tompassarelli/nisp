@@ -36,7 +36,13 @@
                   make-schema-state schema-state? schema-state-table
                   load-schema!
                   schema-lookup
-                  in-submodule?))
+                  in-submodule?)
+         (only-in nisp/validate-packages
+                  make-pkg-cache-state
+                  load-package-cache!
+                  pkg-cache-state-pkgs
+                  pkg-cache-state-unstable
+                  pkg-cache-state-master))
 
 ;; Pull version from the package's info.rkt instead of hardcoding.
 (define-runtime-path INFO-RKT "info.rkt")
@@ -100,6 +106,7 @@
 
 (define documents (make-hash))   ; uri → text
 (define STATE #f)                ; schema-state, lazily initialized
+(define PKG-STATE #f)            ; pkg-cache-state, lazily initialized
 
 (define (uri->path uri)
   (cond [(regexp-match #rx"^file://(.+)$" uri) => cadr]
@@ -134,6 +141,14 @@
       (set! STATE (make-schema-state cfg))
       (with-handlers ([exn:fail? void])
         (load-schema! STATE)))))
+
+(define (ensure-pkg-cache-loaded! example-uri)
+  (unless PKG-STATE
+    (define root (find-flake-root example-uri))
+    (when root
+      (set! PKG-STATE (make-pkg-cache-state))
+      (with-handlers ([exn:fail? void])
+        (load-package-cache! PKG-STATE (build-path root ".nisp-cache"))))))
 
 (define (schema-table)
   (cond [STATE (schema-state-table STATE)]
@@ -305,6 +320,139 @@
     [(string? t) t]
     [else "?"]))
 
+;; Package completion context detection.
+;;
+;; Returns (cons prefix set-name) when the cursor is in a package context:
+;;   - inside (with-pkgs ...) → prefix is what's been typed, set from prefix
+;;   - inside (lst pkgs.X ...) → prefix is what's been typed after "pkgs."
+;; Returns #f when not in a package context.
+
+(define (detect-pkg-context text line char)
+  (define lines (regexp-split #rx"\n" text))
+  (cond
+    [(>= line (length lines)) #f]
+    [else
+     (define ln (list-ref lines line))
+     (define len (string-length ln))
+     (define ch (min char len))
+     ;; Walk left to find the start of the current token.
+     (define (token-char? c)
+       (or (char-alphabetic? c) (char-numeric? c)
+           (member c '(#\. #\_ #\-))))
+     (define lo
+       (let loop ([i ch])
+         (cond [(or (zero? i) (not (token-char? (string-ref ln (- i 1))))) i]
+               [else (loop (- i 1))])))
+     (define token (substring ln lo ch))
+     ;; Check if we're inside a (with-pkgs ...) form by scanning backwards
+     ;; for an opening paren + with-pkgs.
+     (define before-token (substring ln 0 lo))
+     (define trimmed (string-trim before-token))
+     (cond
+       ;; Inside (with-pkgs ...) — token might be "unstable.foo" or just "foo"
+       [(regexp-match? #rx"\\(with-pkgs\\s" before-token)
+        (cond
+          [(regexp-match #rx"^unstable\\." token)
+           (cons (substring token 9) "unstable")]
+          [(regexp-match #rx"^master\\." token)
+           (cons (substring token 7) "master")]
+          [else (cons token "pkgs")])]
+       ;; Inside (lst ...) and token starts with "pkgs."
+       [(and (regexp-match? #rx"\\(lst\\s" before-token)
+             (string-prefix? token "pkgs."))
+        (define after-pkgs (substring token 5))
+        (cond
+          [(regexp-match #rx"^unstable\\." after-pkgs)
+           (cons (substring after-pkgs 9) "unstable")]
+          [(regexp-match #rx"^master\\." after-pkgs)
+           (cons (substring after-pkgs 7) "master")]
+          [else (cons after-pkgs "pkgs")])]
+       ;; Also check previous lines for multiline forms. Scan upward for
+       ;; an unclosed paren with with-pkgs or lst.
+       [else (detect-pkg-context-multiline lines line lo token)])]))
+
+(define (detect-pkg-context-multiline lines line token-start token)
+  ;; Walk backward through previous lines (up to 20) looking for an
+  ;; unclosed (with-pkgs or (lst form.
+  (define paren-depth 0)
+  (let loop ([l line])
+    (cond
+      [(< l 0) #f]
+      [(> (- line l) 20) #f]
+      [else
+       (define ln (list-ref lines l))
+       (define search-end (if (= l line) token-start (string-length ln)))
+       ;; Count close/open parens in this line portion (right to left).
+       (define adjusted-depth
+         (let ploop ([i (- search-end 1)] [depth paren-depth])
+           (cond
+             [(< i 0) depth]
+             [(char=? (string-ref ln i) #\)) (ploop (- i 1) (+ depth 1))]
+             [(char=? (string-ref ln i) #\() (ploop (- i 1) (- depth 1))]
+             [else (ploop (- i 1) depth)])))
+       (cond
+         ;; If we hit a net-open paren, check what form it starts.
+         [(< adjusted-depth 0)
+          (define prefix-text
+            (let ([start (for/or ([i (in-range (- (string-length ln) 1) -1 -1)]
+                                  #:when (char=? (string-ref ln i) #\())
+                           i)])
+              (if start (substring ln start) "")))
+          (cond
+            [(regexp-match? #rx"^\\(with-pkgs\\s" prefix-text)
+             (cond
+               [(regexp-match #rx"^unstable\\." token)
+                (cons (substring token 9) "unstable")]
+               [(regexp-match #rx"^master\\." token)
+                (cons (substring token 7) "master")]
+               [else (cons token "pkgs")])]
+            [(and (regexp-match? #rx"^\\(lst\\s" prefix-text)
+                  (string-prefix? token "pkgs."))
+             (define after-pkgs (substring token 5))
+             (cond
+               [(regexp-match #rx"^unstable\\." after-pkgs)
+                (cons (substring after-pkgs 9) "unstable")]
+               [(regexp-match #rx"^master\\." after-pkgs)
+                (cons (substring after-pkgs 7) "master")]
+               [else (cons after-pkgs "pkgs")])]
+            [else #f])]
+         [else
+          (set! paren-depth adjusted-depth)
+          (loop (- l 1))])])))
+
+(define (pkg-set-names state set-name)
+  (case set-name
+    [("pkgs")     (pkg-cache-state-pkgs state)]
+    [("unstable") (pkg-cache-state-unstable state)]
+    [("master")   (pkg-cache-state-master state)]
+    [else '()]))
+
+(define (complete-packages uri text line char)
+  ;; Returns #f if not in package context, otherwise returns the
+  ;; completion response hash.
+  (define ctx (detect-pkg-context text line char))
+  (cond
+    [(not ctx) #f]
+    [else
+     (ensure-pkg-cache-loaded! uri)
+     (cond
+       [(not PKG-STATE) #f]
+       [else
+        (define prefix (car ctx))
+        (define set-name (cdr ctx))
+        (define names (pkg-set-names PKG-STATE set-name))
+        (define matches
+          (for/list ([name (in-list names)]
+                     #:when (string-prefix? name prefix))
+            (hasheq 'label name
+                    'kind 12   ; Value
+                    'detail (format "pkgs (~a)" set-name))))
+        (define sorted
+          (sort matches string<? #:key (λ (h) (hash-ref h 'label))))
+        (define limited (if (> (length sorted) 50) (take sorted 50) sorted))
+        (hasheq 'isIncomplete (> (length sorted) 50)
+                'items limited)])]))
+
 (define (handle-completion params)
   (define uri (hash-ref (hash-ref params 'textDocument) 'uri))
   (define pos (hash-ref params 'position))
@@ -314,22 +462,27 @@
   (cond
     [(not text) (hasheq 'isIncomplete #f 'items '())]
     [else
-     (ensure-schema-loaded! uri)
-     (define word (or (text-at-position text line char) ""))
-     (define matches
-       (for/list ([(p e) (in-hash (schema-table))]
-                  #:when (and (string? p)
-                              (string-prefix? p word)))
-         (define t (hash-ref e 't "?"))
-         (define inner (hash-ref e 'inner #f))
-         (hasheq 'label p
-                 'kind 14   ; Property
-                 'detail (describe-type t inner))))
-     (define sorted
-       (sort matches string<? #:key (λ (h) (hash-ref h 'label))))
-     (define limited (if (> (length sorted) 100) (take sorted 100) sorted))
-     (hasheq 'isIncomplete (> (length sorted) 100)
-             'items limited)]))
+     ;; Try package completion first; fall back to option path completion.
+     (define pkg-result (complete-packages uri text line char))
+     (cond
+       [pkg-result pkg-result]
+       [else
+        (ensure-schema-loaded! uri)
+        (define word (or (text-at-position text line char) ""))
+        (define matches
+          (for/list ([(p e) (in-hash (schema-table))]
+                     #:when (and (string? p)
+                                 (string-prefix? p word)))
+            (define t (hash-ref e 't "?"))
+            (define inner (hash-ref e 'inner #f))
+            (hasheq 'label p
+                    'kind 14   ; Property
+                    'detail (describe-type t inner))))
+        (define sorted
+          (sort matches string<? #:key (λ (h) (hash-ref h 'label))))
+        (define limited (if (> (length sorted) 100) (take sorted 100) sorted))
+        (hasheq 'isIncomplete (> (length sorted) 100)
+                'items limited)])]))
 
 ;; ============================================================================
 ;; Code actions (quick-fix: apply did-you-mean suggestion)

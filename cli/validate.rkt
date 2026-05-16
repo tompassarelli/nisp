@@ -130,6 +130,25 @@
   (define total-errors 0)
   (define pkg-errors 0)
   (define auto-fixes-applied 0)
+  (define cross-file-conflicts 0)
+
+  ;; Cross-file conflict detection:
+  ;; path → (listof (list file line col val-summary))
+  (define cross-file-assignments (make-hash))
+
+  ;; Summarize a value syntax for cross-file comparison.
+  ;; Returns a known representation or '<expr> for complex forms.
+  (define (summarize-val val-stx)
+    (cond
+      [(not val-stx) '<expr>]
+      [else
+       (define dat (and (syntax? val-stx) (syntax->datum val-stx)))
+       (cond
+         [(boolean? dat) dat]
+         [(exact-integer? dat) dat]
+         [(string? dat) dat]
+         [(eq? dat 'null) 'null]
+         [else '<expr>])]))
 
   (define (try-auto-fix! src-file p sims)
     (cond
@@ -227,7 +246,15 @@
                   (when val-stx
                     (define loc (cons (or (syntax-line stx-loc) 0)
                                      (or (syntax-column stx-loc) 0)))
-                    (hash-update! path-assignments p (λ (v) (cons loc v)) '()))
+                    (hash-update! path-assignments p (λ (v) (cons loc v)) '())
+                    ;; Track for cross-file conflict detection
+                    (define xf-entry
+                      (list src
+                            (or (syntax-line stx-loc) 0)
+                            (or (syntax-column stx-loc) 0)
+                            (summarize-val val-stx)))
+                    (hash-update! cross-file-assignments p
+                                  (λ (v) (cons xf-entry v)) '()))
                   (case (validate-path p)
                     [(unknown) (report-unknown-path src stx-loc p)]
                     [(ok)
@@ -253,6 +280,55 @@
         (define first-line (car (car sorted)))
         (for ([loc (in-list (cdr sorted))])
           (report-duplicate-assignment src path first-line (car loc) (cdr loc))))))
+
+  ;; List-type options that are designed for multi-module contribution.
+  ;; These are never flagged as cross-file conflicts.
+  (define LIST-TYPED-SKIP-TYPES '("listOf"))
+
+  (define (option-is-list-type? path)
+    (define entry (schema-lookup/wildcard STATE path))
+    (and entry
+         (let ([t (hash-ref entry 't #f)])
+           (and t (member t LIST-TYPED-SKIP-TYPES) #t))))
+
+  ;; Detect cross-file conflicts: multiple files setting the same scalar
+  ;; option to different values.
+  (define (check-cross-file-conflicts!)
+    (for ([(path entries) (in-hash cross-file-assignments)])
+      ;; Only care if multiple files contribute
+      (define files-involved
+        (remove-duplicates (map car entries)))
+      (when (> (length files-involved) 1)
+        ;; Skip list-typed options (designed for multi-module contribution)
+        (unless (option-is-list-type? path)
+          ;; Collect unique known values
+          (define vals (map (λ (e) (list-ref e 3)) entries))
+          (define known-vals (filter (λ (v) (not (eq? v '<expr>))) vals))
+          (define unique-known (remove-duplicates known-vals))
+          ;; Conflict exists if:
+          ;; - Two or more distinct known literals exist, OR
+          ;; - We skip if all known values are the same (benign duplication)
+          (when (> (length unique-known) 1)
+            (set! cross-file-conflicts (+ cross-file-conflicts 1))
+            (eprintf "warning: option ~a set by multiple modules with different values:\n"
+                     path)
+            ;; Group by file, show one entry per file (first occurrence)
+            (define seen-files (make-hash))
+            (for ([e (in-list (reverse entries))])
+              (define file (car e))
+              (unless (hash-has-key? seen-files file)
+                (hash-set! seen-files file #t)
+                (define line (list-ref e 1))
+                (define col (list-ref e 2))
+                (define val (list-ref e 3))
+                (define val-str
+                  (cond
+                    [(string? val) (format "~s" val)]
+                    [(boolean? val) (if val "#t" "#f")]
+                    [(eq? val 'null) "null"]
+                    [(number? val) (format "~a" val)]
+                    [else "<expr>"]))
+                (eprintf "  ~a:~a:~a: ~a\n" file line col val-str))))))))
 
   (define files
     (cond
@@ -286,8 +362,15 @@
   (for ([f (in-list files)])
     (validate-file f))
 
+  ;; Cross-file conflict detection (after all files are validated)
+  (check-cross-file-conflicts!)
+
   (when (and (AUTO-FIX?) (positive? auto-fixes-applied))
     (printf "nisp validate: applied ~a auto-fix(es). Re-run to verify.\n" auto-fixes-applied))
+
+  (when (positive? cross-file-conflicts)
+    (eprintf "nisp validate: ~a cross-module conflict(s) (non-list options set by multiple files with different values)\n"
+             cross-file-conflicts))
 
   (if (zero? total-errors)
       (printf "nisp validate: clean — no errors.\n")
