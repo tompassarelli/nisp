@@ -24,7 +24,12 @@
                   schema-lookup schema-lookup/wildcard
                   namespace-known? in-submodule?
                   has-interpolation?
-                  MODULE-STRUCTURAL-KEYS))
+                  MODULE-STRUCTURAL-KEYS)
+         (only-in nisp/validate-packages
+                  pkg-ref pkg-ref-name pkg-ref-set pkg-ref-src-stx
+                  make-pkg-cache-state load-package-cache!
+                  pkg-cache-loaded? validate-pkg-ref
+                  extract-pkg-refs-from-form))
 
 (provide main)
 
@@ -42,6 +47,7 @@
   (define FLAKE (make-parameter #f))
   (define HM-ROOTS-RAW (make-parameter #f))
   (define AUTO-FIX? (make-parameter #f))
+  (define NO-PACKAGES? (make-parameter #f))
 
   (define files-arg
     (command-line
@@ -54,6 +60,7 @@
      [("--no-hm") "shorthand for --hm-roots \"\"" (HM-ROOTS-RAW "")]
      [("--auto-fix") "apply unambiguous did-you-mean corrections (single suggestion at edit distance ≤ 2)"
       (AUTO-FIX? #t)]
+     [("--no-packages") "skip package name validation" (NO-PACKAGES? #t)]
      #:args files files))
 
   (define FLAKE-ROOT
@@ -98,6 +105,13 @@
   (define STATE (make-schema-state CFG))
   (load-schema! STATE)
 
+  ;; Package validation state
+  (define PKG-STATE (make-pkg-cache-state))
+  (unless (NO-PACKAGES?)
+    (load-package-cache! PKG-STATE (cache-config-cache-dir CFG))
+    (unless (pkg-cache-loaded? PKG-STATE)
+      (printf "nisp validate: package cache not found, skipping package checks (run `nisp extract-packages` to enable)\n")))
+
   (define (find-similar path [n 3])
     (find-similar-strs path (hash-keys (schema-state-table STATE)) n))
 
@@ -114,6 +128,7 @@
       [else 'unknown]))
 
   (define total-errors 0)
+  (define pkg-errors 0)
   (define auto-fixes-applied 0)
 
   (define (try-auto-fix! src-file p sims)
@@ -162,6 +177,23 @@
     (define col  (or (and val-stx (syntax-column val-stx)) "?"))
     (eprintf "~a:~a:~a: type mismatch at ~a: ~a\n" src line col p msg))
 
+  (define (report-unknown-pkg src ref suggestions)
+    (set! pkg-errors (+ pkg-errors 1))
+    (set! total-errors (+ total-errors 1))
+    (define stx (pkg-ref-src-stx ref))
+    (define line (or (and stx (syntax-line stx)) "?"))
+    (define col  (or (and stx (syntax-column stx)) "?"))
+    (eprintf "~a:~a:~a: unknown package ~a in ~a set\n"
+             src line col (pkg-ref-name ref) (pkg-ref-set ref))
+    (when (not (null? suggestions))
+      (eprintf "  did you mean: ~a?\n"
+               (string-join suggestions ", " #:before-last " or "))))
+
+  (define (report-duplicate-assignment src path first-line line col)
+    (set! total-errors (+ total-errors 1))
+    (eprintf "~a:~a:~a: duplicate assignment to ~a (first set at line ~a)\n"
+             src line col path first-line))
+
   (define (validate-file f)
     (define raw (call-with-input-file f port->string))
     (define-values (lang-prefix rest)
@@ -174,6 +206,8 @@
     (define port (open-input-string padded))
     (port-count-lines! port)
     (define src (path->string f))
+    ;; Duplicate detection: path → (list (cons line col))
+    (define path-assignments (make-hash))
     (with-handlers ([exn:fail:read?
                      (λ (e)
                        (eprintf "~a: parse error: ~a\n" src (exn-message e))
@@ -184,10 +218,16 @@
           (walk-syntax stx
             (λ (s in-hm?)
               (unless in-hm?
+                ;; Option path validation
                 (for ([pr (in-list (extract-from-form s))])
                   (define p (path-ref-path pr))
                   (define stx-loc (path-ref-stx pr))
                   (define val-stx (path-ref-val-stx pr))
+                  ;; Track assignments for duplicate detection
+                  (when val-stx
+                    (define loc (cons (or (syntax-line stx-loc) 0)
+                                     (or (syntax-column stx-loc) 0)))
+                    (hash-update! path-assignments p (λ (v) (cons loc v)) '()))
                   (case (validate-path p)
                     [(unknown) (report-unknown-path src stx-loc p)]
                     [(ok)
@@ -198,8 +238,21 @@
                          (define result (check-type entry vt))
                          (when (and (pair? result) (eq? (car result) 'mismatch))
                            (report-type-mismatch src val-stx p (cadr result)))))]
-                    [else (void)])))))
-          (loop)))))
+                    [else (void)]))
+                ;; Package validation
+                (when (and (pkg-cache-loaded? PKG-STATE) (not (NO-PACKAGES?)))
+                  (for ([ref (in-list (extract-pkg-refs-from-form s))])
+                    (define result (validate-pkg-ref PKG-STATE ref))
+                    (when (and (pair? result) (eq? (car result) 'unknown))
+                      (report-unknown-pkg src ref (cadr result))))))))
+          (loop))))
+    ;; Report duplicates
+    (for ([(path locs) (in-hash path-assignments)])
+      (when (> (length locs) 1)
+        (define sorted (sort locs < #:key car))
+        (define first-line (car (car sorted)))
+        (for ([loc (in-list (cdr sorted))])
+          (report-duplicate-assignment src path first-line (car loc) (cdr loc))))))
 
   (define files
     (cond
@@ -237,7 +290,10 @@
     (printf "nisp validate: applied ~a auto-fix(es). Re-run to verify.\n" auto-fixes-applied))
 
   (if (zero? total-errors)
-      (printf "nisp validate: clean — no unknown options.\n")
-      (eprintf "\n~a error(s).\n" total-errors))
+      (printf "nisp validate: clean — no errors.\n")
+      (begin
+        (when (positive? pkg-errors)
+          (eprintf "  (~a package error(s))\n" pkg-errors))
+        (eprintf "\n~a error(s).\n" total-errors)))
 
   (exit (if (zero? total-errors) 0 1)))

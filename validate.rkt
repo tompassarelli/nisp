@@ -86,8 +86,11 @@
               (let ([inner (syntax->datum (cadr lst))])
                 (and (symbol? inner) (symbol->string inner)))))))
 
-;; Extract path-refs from a single form. Currently recognises `(set 'PATH val)`
-;; and `(enable 'P1 'P2 ...)`. Other forms return '().
+;; Extract path-refs from a single form. Recognises:
+;;   (set 'PATH val)           — quoted path (legacy / test syntax)
+;;   (set path.name val)       — bare identifier (standard nisp DSL)
+;;   (enable 'P1 'P2 ...)     — quoted paths
+;;   (enable p1 p2 ...)        — bare identifiers
 (define (extract-from-form stx)
   (define lst (syntax->list stx))
   (cond
@@ -98,7 +101,13 @@
      (define rest (cdr lst))
      (cond
        [(and (eq? head 'set) (not (null? rest)))
-        (define maybe-path (extract-quoted-sym (car rest)))
+        (define maybe-path
+          (or (extract-quoted-sym (car rest))
+              (and (identifier? (car rest))
+                   (let ([d (syntax->datum (car rest))])
+                     (and (symbol? d)
+                          (regexp-match? #rx"\\." (symbol->string d))
+                          (symbol->string d))))))
         (define val-stx (and (not (null? (cdr rest))) (cadr rest)))
         (if maybe-path
             (list (path-ref maybe-path (car rest) val-stx))
@@ -106,7 +115,11 @@
        [(eq? head 'enable)
         (filter-map
          (λ (arg)
-           (define p (extract-quoted-sym arg))
+           (define p (or (extract-quoted-sym arg)
+                         (and (identifier? arg)
+                              (let ([d (syntax->datum arg)])
+                                (and (symbol? d)
+                                     (symbol->string d))))))
            (and p (path-ref (string-append p ".enable") arg #f)))
          rest)]
        [else '()])]))
@@ -311,7 +324,10 @@
        [(packages)
         (define inner (hash-ref expected-entry 'inner #f))
         (define inner-t (and inner (hash-ref inner 't "?")))
-        (if (or (not inner-t) (equal? inner-t "package") (member inner-t PERMISSIVE-TYPES))
+        (if (or (not inner-t)
+                (equal? inner-t "package")
+                (path-type? inner-t)
+                (member inner-t PERMISSIVE-TYPES))
             'ok
             `(mismatch ,(format "expected listOf ~a, got list of packages" inner-t)))]
        [(list)

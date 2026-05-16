@@ -9,15 +9,20 @@ mismatches, and enum violations at `file:line:col` — before
 $ nisp validate
 modules/printing/default.rkt:6:7: unknown option services.pipwire.alsa.enable
   did you mean: services.pipewire.alsa.enable?
+modules/net/default.rkt:10:47: unknown package networkmanagers in pkgs set
+  did you mean: networkmanager, networkmanager-ssh or networkmanager-sstp?
 hosts/laptop/configuration.rkt:11:47: type mismatch at boot.loader.systemd-boot.consoleMode:
   "atuo" not in enum {"0", "1", "2", "auto", "max", "keep"} — did you mean "auto"?
+modules/foo/default.rkt:8:9: duplicate assignment to networking.hostName (first set at line 5)
 ```
 
 NixOS validates option paths and types too, but only during module
 evaluation — by then the authoring context is gone and errors point at
 the force site, not the mistake. Compiling from an eager language to a
 lazy one buys you a walkable AST stage *before* emission. nisp
-validates there, against the schema NixOS already publishes.
+validates there, against the schema NixOS already publishes — plus a
+cached index of 25K+ nixpkgs attribute names for package-level
+checking.
 
 > **Is this *really* statically typed?** The type system being
 > checked is NixOS's options schema, not one defined inside nisp — so
@@ -85,8 +90,9 @@ Subcommands (`nisp <cmd> --help` for full options):
 
 | command | what it does |
 |---|---|
-| `nisp validate` | walk `.rkt` sources, report unknown option paths + type mismatches with did-you-mean. `--auto-fix` rewrites unambiguous typos. |
+| `nisp validate` | walk `.rkt` sources, report unknown option paths + type mismatches + invalid package names + duplicate assignments, all with did-you-mean. `--auto-fix` rewrites unambiguous typos. `--no-packages` skips package checks. |
 | `nisp extract-schema` | dump an options tree (NixOS, home-manager, nix-darwin, anything `nixpkgs.lib.evalModules`-shaped) into `.nisp-cache/schema.json`. Re-run after `nix flake update`. |
+| `nisp extract-packages` | dump top-level package attr names (pkgs + unstable + master, with overlays) into `.nisp-cache/packages.json`. Enables package-name validation. |
 | `nisp import [file]` | translate `.nix` → `.rkt`. Built on rnix-parser; 100% pass rate on all 2,332 nixpkgs/nixos modules; comments preserved. |
 | `nisp schema <path>` | query the cached schema. `--children <prefix>` lists sub-options; `--search <query>` does fuzzy matching across all 16k+ paths. `--json` for machine-readable output. |
 | `nisp rename <old> <new>` | rename an option path across every `.rkt` in the flake. Word-boundary matching; `--dry-run` previews. |
@@ -290,12 +296,14 @@ agents but useful for any contributor.
 
 ## Status
 
-`v0.12.0` — single-binary CLI (`nisp <subcommand>`) plus `nisp-lsp`.
-Full Nix surface coverage. 77 tests. Output is byte-equivalent to
-hand-written Nix on a real-world ~200-module config; `nisp import`
-handles 100% of nixpkgs (2,332 modules) via rnix-parser. LSP provides
-diagnostics, hover, completion, code actions, goto-definition. API
-may shift before `v1.0` based on usage feedback.
+`v0.13.0` — single-binary CLI (`nisp <subcommand>`) plus `nisp-lsp`.
+Full Nix surface coverage. 77 tests. Validates option paths, value
+types, enum values, package names (25K+ attrs cached per package set),
+and duplicate assignments across a real-world 211-file config in ~5
+seconds. `nisp import` handles 100% of nixpkgs (2,332 modules) via
+rnix-parser. LSP provides diagnostics, hover, completion, code
+actions, goto-definition. API may shift before `v1.0` based on usage
+feedback.
 
 ## License
 

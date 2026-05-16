@@ -217,6 +217,10 @@
   ;; expanded (cache has non-empty entries for it), DON'T accept the
   ;; path as a submodule fallback — it's a real typo. Otherwise fall
   ;; back to the heuristic.
+  ;;
+  ;; Exception: if path is exactly one segment deeper than an attrsOf/lazyAttrsOf
+  ;; ancestor, it's a key assignment (e.g. systemd.services.myService) and is
+  ;; always valid — the key is user-defined, not schema-defined.
   (let loop ([parts (string-split path ".")])
     (cond
       [(null? parts) #f]
@@ -227,6 +231,8 @@
        (define entry (schema-lookup state prefix))
        (define t (and entry (hash-ref entry 't #f)))
        (cond
+         [(and t (member t '("attrsOf" "lazyAttrsOf")))
+          #t]
          [(and t (member t SUBMODULE-TYPES))
           (define cached (hash-ref (schema-state-sub-cache state) prefix #f))
           (cond
