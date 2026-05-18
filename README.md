@@ -16,19 +16,17 @@ hosts/laptop/configuration.rkt:11:47: type mismatch at boot.loader.systemd-boot.
 modules/foo/default.rkt:8:9: duplicate assignment to networking.hostName (first set at line 5)
 ```
 
-NixOS validates option paths and types too, but only during module
-evaluation — by then the authoring context is gone and errors point at
-the force site, not the mistake. Compiling from an eager language to a
-lazy one buys you a walkable AST stage *before* emission. nisp
-validates there, against the schema NixOS already publishes — plus a
-cached index of 25K+ nixpkgs attribute names for package-level
-checking.
+NixOS already validates option paths and types, but only at module
+evaluation time — errors point at the force site, not the typo. nisp
+compiles from an eager language to a lazy one, which means there's a
+walkable AST *before* anything gets emitted. The validator runs there,
+checking against the options schema NixOS publishes and a cached index
+of 25K+ nixpkgs attribute names.
 
-> **Is this *really* statically typed?** The type system being
-> checked is NixOS's options schema, not one defined inside nisp — so
-> strictly, gradually typed via external schema. Closer to TypeScript
-> over JavaScript than to ML. Practically: errors before runtime, at
-> the source line, with did-you-mean.
+> **Is this really statically typed?** It checks NixOS's options
+> schema, not a type system defined inside the language — closer to
+> TypeScript over JavaScript than to ML. The practical result: errors
+> before runtime, at the source line, with did-you-mean suggestions.
 
 ## A taste
 
@@ -60,12 +58,12 @@ checking.
 
 Both `.rkt` and the emitted `.nix` are committed; the flake reads
 ordinary Nix. You're not trapped — drop down to raw Nix anytime, or
-stop using nisp by deleting the `.rkt` files.
+stop using nisp entirely by deleting the `.rkt` files.
 
 ## Install
 
-Requires Racket 8.x. Nix is needed for `validate`'s submodule
-expansion. Cargo is needed once to build `import`'s parser shim.
+Requires Racket 8.x, Nix (for schema extraction), and Cargo (one-time
+build of the `import` parser shim).
 
 ```bash
 git clone https://github.com/tompassarelli/nisp
@@ -77,70 +75,66 @@ export PATH="$PWD/bin:$PATH"
 
 ## Usage
 
-The toolchain is a single `nisp` binary plus a `nisp-lsp` server
-(separate so editors can spawn it by name).
-
 ```bash
 nisp extract-schema           # cache the options schema for your host
 nisp validate                 # check every .rkt in the cwd's flake
 nisp import some-config.nix   # convert existing Nix to nisp
 ```
 
+The toolchain is a single `nisp` dispatcher. Run `nisp <cmd> --help`
+for full options on any subcommand.
+
 | command | what it does |
 |---|---|
-| `nisp validate` | walk `.rkt` sources, report unknown option paths + type mismatches + invalid package names + duplicate assignments, all with did-you-mean. `--auto-fix` rewrites unambiguous typos. `--no-packages` skips package checks. |
-| `nisp extract-schema` | dump an options tree (NixOS, home-manager, nix-darwin, anything `nixpkgs.lib.evalModules`-shaped) into `.nisp-cache/schema.json`. Re-run after `nix flake update`. |
-| `nisp extract-packages` | dump top-level package attr names (pkgs + unstable + master, with overlays) into `.nisp-cache/packages.json`. Enables package-name validation. |
-| `nisp import [file]` | translate `.nix` → `.rkt`. Built on rnix-parser; 100% pass rate on all 2,332 nixpkgs/nixos modules; comments preserved. |
-| `nisp schema <path>` | query the cached schema. `--children <prefix>` lists sub-options; `--search <query>` does fuzzy matching across all 16k+ paths. `--json` for machine-readable output. |
-| `nisp rename <old> <new>` | rename an option path across every `.rkt` in the flake. Word-boundary matching; `--dry-run` previews. |
-| `nisp edit <op> <file> ...` | programmatic, source-text-preserving edits: `set` / `unset` for `(set 'PATH val)` forms, `enable-add` / `enable-remove` for `(enable a b c)` lists. |
-| `nisp-lsp` | LSP server (separate binary). Diagnostics, hover, completion, code actions, goto-definition. |
+| `validate` | check `.rkt` sources for unknown option paths, type mismatches, invalid package names, and duplicate assignments. `--auto-fix` rewrites unambiguous typos. |
+| `extract-schema` | dump an options tree into `.nisp-cache/schema.json`. Works with NixOS, home-manager, nix-darwin — anything `evalModules`-shaped. Re-run after `nix flake update`. |
+| `extract-packages` | dump nixpkgs attribute names into `.nisp-cache/packages.json` for package-name validation. |
+| `import [file]` | translate `.nix` → `.rkt`. Comments preserved. 100% pass rate on all 2,332 nixpkgs/nixos modules. |
+| `schema <path>` | query the cached schema: `--children`, `--search` (fuzzy), `--json`. |
+| `rename <old> <new>` | rename an option path across every `.rkt` in the flake. `--dry-run` to preview. |
+| `edit <op> <file>` | source-preserving edits: `set`/`unset`, `enable-add`/`enable-remove`. |
 
-See `nisp <cmd> --help` for full options.
+`nisp-lsp` is a separate binary (so editors can spawn it by name)
+providing diagnostics, hover, completion, code actions, and
+goto-definition. See [editor setup](docs/editor-setup.md) for
+configuration.
 
-## Documentation
+## Further reading
 
-| doc | covers |
-|---|---|
-| [Language reference](docs/language-reference.md) | surface forms, module-shape wrappers, clauses, convenience forms, `mk*` helpers, type helpers |
-| [Editor setup](docs/editor-setup.md) | Doom Emacs, Helix, Neovim (LSP configuration) |
-| [API](docs/api.md) | using nisp as a Racket library |
-| [AGENTS.md](AGENTS.md) | repo layout, how to add forms / subcommands / LSP capabilities, release process (aimed at AI coding agents but useful for any contributor) |
+- [Language reference](docs/language-reference.md) — surface forms, module-shape wrappers, `mk*` helpers, type helpers
+- [Editor setup](docs/editor-setup.md) — LSP configuration for Doom Emacs, Helix, Neovim
+- [API](docs/api.md) — using nisp as a Racket library
+- [AGENTS.md](AGENTS.md) — repo internals, contributor guide, release process
 
-## A NixOS framework on top
+## Ecosystem
 
 [firnos](https://github.com/tompassarelli/firnos) is a NixOS
 configuration framework built on nisp — modules, bundles, host
 configs, scaffolding, the `firn` CLI. If you want "Doom Emacs for
 NixOS config", that's the one.
 
-### Heads-up for downstream consumers (and AI agents)
-
 A nisp-based repo typically commits **both** the `.rkt` and the
-generated `.nix` next to each other. The flake reads the `.nix`, but
-the `.nix` is a build artifact — regenerating from the `.rkt` will
-overwrite direct `.nix` edits. **Always edit the `.rkt`.** Add a
-`CLAUDE.md` / `AGENTS.md` to your config repo saying so explicitly,
-since agents reaching in via absolute path from a different working
-directory may not auto-load the file.
+generated `.nix` side by side. The flake reads the `.nix`, but it's a
+build artifact — **always edit the `.rkt`**. If you're an AI agent
+reaching in from another working directory, note that you won't
+auto-load this repo's instructions; add a `CLAUDE.md` / `AGENTS.md`
+to your config repo to make the convention explicit.
+
+## Status
+
+v0.13.0. Full Nix surface coverage, 77 tests.
+
+Validates a real-world 211-file config in ~5 seconds. `nisp import`
+handles 100% of nixpkgs (2,332 modules). The LSP covers diagnostics,
+hover, completion, code actions, and goto-definition.
+
+API may shift before v1.0 based on usage feedback.
 
 ## Tests
 
 ```bash
 raco test tests/
 ```
-
-## Status
-
-`v0.13.0` — single-binary CLI (`nisp <subcommand>`) plus `nisp-lsp`.
-Full Nix surface coverage. 77 tests. Validates option paths, value
-types, enum values, package names (25K+ attrs cached per package set),
-and duplicate assignments across a real-world 211-file config in ~5
-seconds. `nisp import` handles 100% of nixpkgs (2,332 modules) via
-rnix-parser. LSP provides diagnostics, hover, completion, code
-actions, goto-definition. API may shift before `v1.0` based on usage
-feedback.
 
 ## License
 
