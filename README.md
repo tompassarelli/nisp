@@ -1,4 +1,4 @@
-# nisp
+# Nisp
 
 **Statically-checked Lisp for Nix.** A Racket `#lang` that compiles to
 Nix, paired with a checker that catches unknown option paths, type
